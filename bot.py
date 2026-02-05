@@ -145,6 +145,28 @@ async def _send_long_text(update: Update, context: ContextTypes.DEFAULT_TYPE, te
         await _reply_text(update, context, part)
 
 
+async def _send_long_text_from_query(query, context: ContextTypes.DEFAULT_TYPE, text: str, chunk_size: int = 3500):
+    if len(text) <= chunk_size:
+        await _reply_to_query(query, context, text)
+        return
+    parts = []
+    current = []
+    length = 0
+    for line in text.split("\n"):
+        add_len = len(line) + 1
+        if length + add_len > chunk_size and current:
+            parts.append("\n".join(current))
+            current = [line]
+            length = len(line) + 1
+        else:
+            current.append(line)
+            length += add_len
+    if current:
+        parts.append("\n".join(current))
+    for part in parts:
+        await _reply_to_query(query, context, part)
+
+
 async def _edit_text(query, context: ContextTypes.DEFAULT_TYPE, text: str, **kwargs):
     msg = await query.edit_message_text(text, **kwargs)
     _schedule_delete(msg, context)
@@ -163,7 +185,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "Welcome! This bot stores titles, episodes, and links.\n"
         "How to use:\n"
-        "- Use /link to browse titles and open episode links.\n"
+        "- Use /linkmanga to browse titles and open episode links.\n"
         "- Use /listep 1-10 to generate episode labels (optional).\n"
         "- Use /getuserid to get a user ID (reply to a message to get that user).\n"
         "- Use /donateadmin to show the donation QR code.\n"
@@ -181,7 +203,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         context,
         "User commands:\n"
         "/start - welcome & how to use\n"
-        "/link - show titles\n"
+        "/linkmanga - show titles\n"
         "/listep 1-10 - generate episode labels\n"
         "/getuserid - get user ID (reply to a message)\n"
         "/donateadmin - show donation QR code\n"
@@ -192,6 +214,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/removeadmin <user_id> - remove admin (main admins only)\n"
         "/listadmin - list admins (main admins only)\n"
         "/cancel - cancel current admin input\n"
+        "/done - finish bulk add input\n"
         "\n"
         "Admin rules:\n"
         "- Main admins can manage all data.\n"
@@ -203,11 +226,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _reset_pending(context)
+    context.user_data.pop("bulk_buffer", None)
     _schedule_delete(update.message, context)
     await _reply_text(update, context, "Cancelled.")
 
 
-async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def linkmanga_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _reset_pending(context)
     _schedule_delete(update.message, context)
     titles = db.get_titles()
@@ -307,6 +331,75 @@ async def remove_admin_command(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         await _reply_text(update, context, "Admin not found.")
 
+
+async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _schedule_delete(update.message, context)
+    if context.user_data.get("pending_action") != "bulk_add":
+        await _reply_text(update, context, "Nothing to finish.")
+        return
+    buffer = context.user_data.get("bulk_buffer", "")
+    if not buffer.strip():
+        _reset_pending(context)
+        context.user_data.pop("bulk_buffer", None)
+        await _reply_text(update, context, "No bulk data received.")
+        return
+    # Reuse bulk add parsing by sending through handler
+    await _process_bulk_add(update, context, buffer)
+
+
+async def _process_bulk_add(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+    title_id = context.user_data.get("pending_title_id")
+    if not title_id:
+        _reset_pending(context)
+        context.user_data.pop("bulk_buffer", None)
+        await _reply_text(update, context, "Missing state. Start again from /admin.")
+        return
+    raw = text.replace("\u200b", "").strip()
+    # Merge lines that start with URL query fragments onto the previous line
+    merged_lines = []
+    for line in raw.splitlines():
+        part = line.strip()
+        if not part:
+            continue
+        if merged_lines and (part.startswith("?") or part.startswith("&") or part.startswith("story_fbid=") or part.startswith("fbid=")):
+            merged_lines[-1] = merged_lines[-1] + part
+        else:
+            merged_lines.append(part)
+    raw = "\n".join(merged_lines)
+    url_re = re.compile(r"https?://\S+", re.IGNORECASE)
+    matches = list(url_re.finditer(raw))
+    if not matches:
+        await _reply_text(update, context, "Please include at least one http/https link.")
+        return
+    added = 0
+    skipped = 0
+    prev_end = 0
+    for m in matches:
+        name = raw[prev_end:m.start()].strip()
+        url = m.group(0).strip()
+        prev_end = m.end()
+        if not name:
+            skipped += 1
+            continue
+        name = _normalize_ep_name(name)
+        url = _normalize_url(url)
+        if not _valid_url(url):
+            skipped += 1
+            continue
+        db.add_episode(int(title_id), name, url, update.effective_user.id)
+        added += 1
+    _reset_pending(context)
+    context.user_data.pop("bulk_buffer", None)
+    keyboard = [
+        [InlineKeyboardButton("List episodes", callback_data=f"admin:eps:{title_id}:0")],
+        [InlineKeyboardButton("Back", callback_data="admin:manage")],
+    ]
+    await _reply_text(
+        update,
+        context,
+        f"Bulk add complete. Added {added}, skipped {skipped}.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
 
 async def get_user_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _reset_pending(context)
@@ -580,6 +673,39 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             return
 
+        if action.startswith("use_title:"):
+            title_id = int(action.split(":", 1)[1])
+            title = db.get_title(title_id)
+            if not title:
+                await _edit_text(query, context, "Title not found.")
+                return
+            if not _can_manage(update.effective_user.id, title["created_by"]):
+                await _edit_text(
+                    query,
+                    context,
+                    "You cannot manage this title.",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("Back", callback_data="admin:manage")]]
+                    ),
+                )
+                return
+            keyboard = [
+                [InlineKeyboardButton("Add episode", callback_data=f"admin:addep:{title_id}")],
+                [InlineKeyboardButton("Bulk add episodes", callback_data=f"admin:bulk_add:{title_id}")],
+                [InlineKeyboardButton("List episodes", callback_data=f"admin:eps:{title_id}:0")],
+                [InlineKeyboardButton("Copy all episodes", callback_data=f"admin:copy_eps:{title_id}")],
+                [InlineKeyboardButton("Edit title", callback_data=f"admin:edit_title:{title_id}")],
+                [InlineKeyboardButton("Delete title", callback_data=f"admin:del_title:{title_id}")],
+                [InlineKeyboardButton("Back", callback_data="admin:manage")],
+            ]
+            await _edit_text(
+                query,
+                context,
+                f"{title['name']} - Choose an action:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
         if action.startswith("titles:"):
             parts = action.split(":")
             if len(parts) < 2:
@@ -796,12 +922,21 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             if not _can_manage(update.effective_user.id, ep["created_by"]):
                 await _edit_text(query, context, "You cannot manage this episode.")
                 return
+            prev_id = db.get_prev_episode_id(ep["title_id"], episode_id)
+            next_id = db.get_next_episode_id(ep["title_id"], episode_id)
             keyboard = [
                 [InlineKeyboardButton("Edit name", callback_data=f"admin:edit_ep_name:{episode_id}")],
                 [InlineKeyboardButton("Edit link", callback_data=f"admin:edit_ep_url:{episode_id}")],
                 [InlineKeyboardButton("Delete episode", callback_data=f"admin:del_ep:{episode_id}")],
                 [InlineKeyboardButton("Back", callback_data=f"admin:eps:{ep['title_id']}:0")],
             ]
+            nav = []
+            if prev_id:
+                nav.append(InlineKeyboardButton("Prev", callback_data=f"admin:ep:{prev_id}"))
+            if next_id:
+                nav.append(InlineKeyboardButton("Next", callback_data=f"admin:ep:{next_id}"))
+            if nav:
+                keyboard.insert(0, nav)
             await _edit_text(query, context, 
                 f"{_display_ep_name(ep['name'])}\nChoose an action:",
                 reply_markup=InlineKeyboardMarkup(keyboard),
@@ -825,6 +960,9 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 query,
                 context,
                 f"{title['name']} - Send the new title name:",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Cancel", callback_data=f"admin:title:{title_id}")]]
+                ),
             )
             return
 
@@ -842,7 +980,11 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             context.user_data["pending_action"] = "edit_ep_name"
             context.user_data["pending_episode_id"] = episode_id
             await _edit_text(query, context, 
-                f"{_display_ep_name(ep['name'])}\nSend the new episode name:")
+                f"{_display_ep_name(ep['name'])}\nSend the new episode name:",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Cancel", callback_data=f"admin:ep:{episode_id}")]]
+                ),
+            )
             return
 
         if action.startswith("edit_ep_url:"):
@@ -859,7 +1001,11 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             context.user_data["pending_action"] = "edit_ep_url"
             context.user_data["pending_episode_id"] = episode_id
             await _edit_text(query, context, 
-                f"{_display_ep_name(ep['name'])}\nSend the new episode link (http/https):")
+                f"{_display_ep_name(ep['name'])}\nSend the new episode link (http/https):",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Cancel", callback_data=f"admin:ep:{episode_id}")]]
+                ),
+            )
             return
 
         if action.startswith("del_title:"):
@@ -966,6 +1112,48 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     if pending == "add_title":
+        existing = db.get_title_by_name(text)
+        if existing:
+            keyboard = [
+                [InlineKeyboardButton("Use existing", callback_data=f"admin:use_title:{existing['id']}")],
+                [InlineKeyboardButton("Cancel", callback_data="admin:manage")],
+            ]
+            _reset_pending(context)
+            await _reply_text(
+                update,
+                context,
+                "Title already exists. Use existing title?",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        
+            if not _can_manage(update.effective_user.id, title["created_by"]):
+                await _edit_text(
+                    query,
+                    context,
+                    "You cannot manage this title.",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("Back", callback_data="admin:manage")]]
+                    ),
+                )
+                return
+            keyboard = [
+                [InlineKeyboardButton("Add episode", callback_data=f"admin:addep:{title_id}")],
+                [InlineKeyboardButton("Bulk add episodes", callback_data=f"admin:bulk_add:{title_id}")],
+                [InlineKeyboardButton("List episodes", callback_data=f"admin:eps:{title_id}:0")],
+                [InlineKeyboardButton("Copy all episodes", callback_data=f"admin:copy_eps:{title_id}")],
+                [InlineKeyboardButton("Edit title", callback_data=f"admin:edit_title:{title_id}")],
+                [InlineKeyboardButton("Delete title", callback_data=f"admin:del_title:{title_id}")],
+                [InlineKeyboardButton("Back", callback_data="admin:manage")],
+            ]
+            await _edit_text(
+                query,
+                context,
+                f"{title['name']} - Choose an action:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
         title_id = db.add_title(text, update.effective_user.id)
         _reset_pending(context)
         if title_id is None:
@@ -1018,7 +1206,14 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         updated = db.update_title(int(title_id), text)
         _reset_pending(context)
         if updated:
-            await _reply_text(update, context, "Title updated.")
+            await _reply_text(
+                update,
+                context,
+                "Title updated.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Back", callback_data="admin:manage")]]
+                ),
+            )
         else:
             await _reply_text(update, context, "Title not found.")
         return
@@ -1037,7 +1232,14 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         updated = db.update_episode(int(episode_id), _normalize_ep_name(text), ep["url"])
         _reset_pending(context)
         if updated:
-            await _reply_text(update, context, "Episode name updated.")
+            await _reply_text(
+                update,
+                context,
+                "Episode name updated.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Back", callback_data=f"admin:ep:{episode_id}")]]
+                ),
+            )
         else:
             await _reply_text(update, context, "Episode not found.")
         return
@@ -1060,43 +1262,23 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         updated = db.update_episode(int(episode_id), ep["name"], url)
         _reset_pending(context)
         if updated:
-            await _reply_text(update, context, "Episode link updated.")
+            await _reply_text(
+                update,
+                context,
+                "Episode link updated.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Back", callback_data=f"admin:ep:{episode_id}")]]
+                ),
+            )
         else:
             await _reply_text(update, context, "Episode not found.")
         return
 
     if pending == "bulk_add":
-        title_id = context.user_data.get("pending_title_id")
-        if not title_id:
-            _reset_pending(context)
-            await _reply_text(update, context, "Missing state. Start again from /admin.")
-            return
-        raw = text.strip()
-        # Parse by URLs so missing newlines don't break pairs.
-        url_re = re.compile(r"https?://\S+", re.IGNORECASE)
-        matches = list(url_re.finditer(raw))
-        if not matches:
-            await _reply_text(update, context, "Please include at least one http/https link.")
-            return
-        added = 0
-        skipped = 0
-        prev_end = 0
-        for m in matches:
-            name = raw[prev_end:m.start()].strip()
-            url = m.group(0).strip()
-            prev_end = m.end()
-            if not name:
-                skipped += 1
-                continue
-            name = _normalize_ep_name(name)
-            url = _normalize_url(url)
-            if not _valid_url(url):
-                skipped += 1
-                continue
-            db.add_episode(int(title_id), name, url, update.effective_user.id)
-            added += 1
-        _reset_pending(context)
-        await _reply_text(update, context, f"Bulk add complete. Added {added}, skipped {skipped}.")
+        buffer = context.user_data.get("bulk_buffer", "")
+        buffer = (buffer + "\n" + text).strip()
+        context.user_data["bulk_buffer"] = buffer
+        await _reply_text(update, context, "Added to bulk input. Send more or /done to finish.")
         return
 
 
@@ -1109,7 +1291,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("cancel", cancel))
-    app.add_handler(CommandHandler("link", link_command))
+    app.add_handler(CommandHandler("linkmanga", linkmanga_command))
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CommandHandler("addadmin", add_admin_command))
     app.add_handler(CommandHandler("removeadmin", remove_admin_command))
@@ -1117,6 +1299,7 @@ def main() -> None:
     app.add_handler(CommandHandler("listadmin", list_admin_command))
     app.add_handler(CommandHandler("listep", list_ep_command))
     app.add_handler(CommandHandler("donateadmin", donate_admin_command))
+    app.add_handler(CommandHandler("done", done_command))
     app.add_handler(CallbackQueryHandler(handle_callbacks))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_text))
 

@@ -89,6 +89,14 @@ class Database:
             )
             return cur.fetchone()
 
+    def get_title_by_name(self, name: str) -> sqlite3.Row | None:
+        with self._conn() as conn:
+            cur = conn.execute(
+                "SELECT id, name, created_by FROM titles WHERE name = ?",
+                (name,),
+            )
+            return cur.fetchone()
+
     def add_episode(self, title_id: int, name: str, url: str, created_by: int) -> int:
         now = datetime.utcnow().isoformat(timespec="seconds")
         with self._conn() as conn:
@@ -129,6 +137,24 @@ class Database:
                 (episode_id,),
             )
             return cur.fetchone()
+
+    def get_prev_episode_id(self, title_id: int, episode_id: int) -> int | None:
+        with self._conn() as conn:
+            cur = conn.execute(
+                "SELECT id FROM episodes WHERE title_id = ? AND id < ? ORDER BY id DESC LIMIT 1",
+                (title_id, episode_id),
+            )
+            row = cur.fetchone()
+            return int(row["id"]) if row else None
+
+    def get_next_episode_id(self, title_id: int, episode_id: int) -> int | None:
+        with self._conn() as conn:
+            cur = conn.execute(
+                "SELECT id FROM episodes WHERE title_id = ? AND id > ? ORDER BY id ASC LIMIT 1",
+                (title_id, episode_id),
+            )
+            row = cur.fetchone()
+            return int(row["id"]) if row else None
 
     def update_episode(self, episode_id: int, name: str, url: str) -> bool:
         with self._conn() as conn:
