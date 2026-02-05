@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+.pytest_cache/
+
+# Virtual env
+.venv/
+venv/
+ENV/
+
+# Environment files
+.env
+.env.*
+
+# DB
+*.db
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Local assets
+/donate_qr.jpg
