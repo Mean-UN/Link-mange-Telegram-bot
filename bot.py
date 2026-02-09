@@ -185,11 +185,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "Welcome! This bot stores titles, episodes, and links.\n"
         "How to use:\n"
-        "- Use /linkmanga to browse titles and open episode links.\n"
+        "- Use /mangalink to browse manga and open episode links.\n"
         "- Use /listep 1-10 to generate episode labels (optional).\n"
         "- Use /getuserid to get a user ID (reply to a message to get that user).\n"
         "- Use /donateadmin to show the donation QR code.\n"
-        "Admins can use /admin to manage titles and episodes."
+        "Admins can use /mangaadmin to manage manga and episodes."
         "\nDeveloped by @Mean_Un"
     )
     await _reply_text(update, context, text)
@@ -203,13 +203,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         context,
         "User commands:\n"
         "/start - welcome & how to use\n"
-        "/linkmanga - show titles\n"
+        "/mangalink - show manga\n"
         "/listep 1-10 - generate episode labels\n"
         "/getuserid - get user ID (reply to a message)\n"
         "/donateadmin - show donation QR code\n"
         "\n"
         "Admin commands:\n"
-        "/admin - admin menu\n"
+        "/mangaadmin - admin menu\n"
         "/addadmin <user_id> - add admin (main admins only)\n"
         "/removeadmin <user_id> - remove admin (main admins only)\n"
         "/listadmin - list admins (main admins only)\n"
@@ -231,12 +231,12 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _reply_text(update, context, "Cancelled.")
 
 
-async def linkmanga_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def mangalink_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _reset_pending(context)
     _schedule_delete(update.message, context)
     titles = db.get_titles()
     if not titles:
-        await _reply_text(update, context, "No titles yet.")
+        await _reply_text(update, context, "No manga yet.")
         return
 
     page_titles, page, pages = _paginate(titles, 0, TITLE_PAGE_SIZE)
@@ -267,11 +267,11 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     titles_count = db.count_titles()
     eps_count = db.count_episodes()
     keyboard = [
-        [InlineKeyboardButton("Add title", callback_data="admin:add_title")],
-        [InlineKeyboardButton("Manage titles", callback_data="admin:manage")],
+        [InlineKeyboardButton("Add manga", callback_data="admin:add_title")],
+        [InlineKeyboardButton("Manage manga", callback_data="admin:manage")],
     ]
     await _reply_text(update, context, 
-        f"Admin panel\nTitles: {titles_count} | Episodes: {eps_count}",
+        f"Admin panel\nManga: {titles_count} | Episodes: {eps_count}",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
@@ -504,7 +504,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         title_id = int(data.split(":", 2)[2])
         title = db.get_title(title_id)
         if not title:
-            await _edit_text(query, context, "Title not found.")
+            await _edit_text(query, context, "Manga not found.")
             return
         episodes = db.get_episodes(title_id)
         if not episodes:
@@ -551,7 +551,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         page = int(parts[3])
         title = db.get_title(title_id)
         if not title:
-            await _edit_text(query, context, "Title not found.")
+            await _edit_text(query, context, "Manga not found.")
             return
         episodes = db.get_episodes(title_id)
         if not episodes:
@@ -597,7 +597,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         page = int(parts[2])
         titles = db.get_titles()
         if not titles:
-            await _edit_text(query, context, "No titles yet.")
+            await _edit_text(query, context, "No manga yet.")
             return
         page_titles, page, pages = _paginate(titles, page, TITLE_PAGE_SIZE)
         keyboard = [
@@ -617,7 +617,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if data == "user:back":
         titles = db.get_titles()
         if not titles:
-            await _edit_text(query, context, "No titles yet.")
+            await _edit_text(query, context, "No manga yet.")
             return
         page_titles, page, pages = _paginate(titles, 0, TITLE_PAGE_SIZE)
         keyboard = [
@@ -644,13 +644,13 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if action == "add_title":
             _reset_pending(context)
             context.user_data["pending_action"] = "add_title"
-            await _edit_text(query, context, "Send the title name:")
+            await _edit_text(query, context, "Send the manga name:")
             return
 
         if action == "manage":
             titles = db.get_titles()
             if not titles:
-                await _edit_text(query, context, "No titles yet.")
+                await _edit_text(query, context, "No manga yet.")
                 return
             page_titles, page, pages = _paginate(titles, 0, TITLE_PAGE_SIZE)
             keyboard = [
@@ -668,7 +668,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await _edit_text(
                 query,
                 context,
-                "Select a title:",
+                "Select a manga:",
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
             return
@@ -677,13 +677,13 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             title_id = int(action.split(":", 1)[1])
             title = db.get_title(title_id)
             if not title:
-                await _edit_text(query, context, "Title not found.")
+                await _edit_text(query, context, "Manga not found.")
                 return
             if not _can_manage(update.effective_user.id, title["created_by"]):
                 await _edit_text(
                     query,
                     context,
-                    "You cannot manage this title.",
+                    "You cannot manage this manga.",
                     reply_markup=InlineKeyboardMarkup(
                         [[InlineKeyboardButton("Back", callback_data="admin:manage")]]
                     ),
@@ -694,8 +694,8 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 [InlineKeyboardButton("Bulk add episodes", callback_data=f"admin:bulk_add:{title_id}")],
                 [InlineKeyboardButton("List episodes", callback_data=f"admin:eps:{title_id}:0")],
                 [InlineKeyboardButton("Copy all episodes", callback_data=f"admin:copy_eps:{title_id}")],
-                [InlineKeyboardButton("Edit title", callback_data=f"admin:edit_title:{title_id}")],
-                [InlineKeyboardButton("Delete title", callback_data=f"admin:del_title:{title_id}")],
+                [InlineKeyboardButton("Edit manga", callback_data=f"admin:edit_title:{title_id}")],
+                [InlineKeyboardButton("Delete manga", callback_data=f"admin:del_title:{title_id}")],
                 [InlineKeyboardButton("Back", callback_data="admin:manage")],
             ]
             await _edit_text(
@@ -713,7 +713,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             page = int(parts[1])
             titles = db.get_titles()
             if not titles:
-                await _edit_text(query, context, "No titles yet.")
+                await _edit_text(query, context, "No manga yet.")
                 return
             page_titles, page, pages = _paginate(titles, page, TITLE_PAGE_SIZE)
             keyboard = [
@@ -731,7 +731,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await _edit_text(
                 query,
                 context,
-                "Select a title:",
+                "Select a manga:",
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
             return
@@ -740,11 +740,11 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             titles_count = db.count_titles()
             eps_count = db.count_episodes()
             keyboard = [
-                [InlineKeyboardButton("Add title", callback_data="admin:add_title")],
-                [InlineKeyboardButton("Manage titles", callback_data="admin:manage")],
+                [InlineKeyboardButton("Add manga", callback_data="admin:add_title")],
+                [InlineKeyboardButton("Manage manga", callback_data="admin:manage")],
             ]
             await _edit_text(query, context, 
-                f"Admin panel\nTitles: {titles_count} | Episodes: {eps_count}",
+                f"Admin panel\nManga: {titles_count} | Episodes: {eps_count}",
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
             return
@@ -753,14 +753,14 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             title_id = int(action.split(":", 1)[1])
             title = db.get_title(title_id)
             if not title:
-                await _edit_text(query, context, "Title not found.")
+                await _edit_text(query, context, "Manga not found.")
                 return
 
             if not _can_manage(update.effective_user.id, title["created_by"]):
                 await _edit_text(
                     query,
                     context,
-                    "You cannot manage this title.",
+                    "You cannot manage this manga.",
                     reply_markup=InlineKeyboardMarkup(
                         [[InlineKeyboardButton("Back", callback_data="admin:manage")]]
                     ),
@@ -771,8 +771,8 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 [InlineKeyboardButton("Bulk add episodes", callback_data=f"admin:bulk_add:{title_id}")],
                 [InlineKeyboardButton("List episodes", callback_data=f"admin:eps:{title_id}:0")],
                 [InlineKeyboardButton("Copy all episodes", callback_data=f"admin:copy_eps:{title_id}")],
-                [InlineKeyboardButton("Edit title", callback_data=f"admin:edit_title:{title_id}")],
-                [InlineKeyboardButton("Delete title", callback_data=f"admin:del_title:{title_id}")],
+                [InlineKeyboardButton("Edit manga", callback_data=f"admin:edit_title:{title_id}")],
+                [InlineKeyboardButton("Delete manga", callback_data=f"admin:del_title:{title_id}")],
                 [InlineKeyboardButton("Back", callback_data="admin:manage")],
             ]
             await _edit_text(
@@ -787,11 +787,11 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             title_id = int(action.split(":", 1)[1])
             title = db.get_title(title_id)
             if not title:
-                await _edit_text(query, context, "Title not found.")
+                await _edit_text(query, context, "Manga not found.")
                 return
 
             if not _can_manage(update.effective_user.id, title["created_by"]):
-                await _edit_text(query, context, "You cannot add episodes to this title.")
+                await _edit_text(query, context, "You cannot add episodes to this manga.")
                 return
             _reset_pending(context)
             context.user_data["pending_action"] = "add_ep_name"
@@ -807,11 +807,11 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             title_id = int(action.split(":", 1)[1])
             title = db.get_title(title_id)
             if not title:
-                await _edit_text(query, context, "Title not found.")
+                await _edit_text(query, context, "Manga not found.")
                 return
 
             if not _can_manage(update.effective_user.id, title["created_by"]):
-                await _edit_text(query, context, "You cannot access episodes from this title.")
+                await _edit_text(query, context, "You cannot access episodes from this manga.")
                 return
             episodes = db.get_episodes(title_id)
             if not episodes:
@@ -844,11 +844,11 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             title_id = int(action.split(":", 1)[1])
             title = db.get_title(title_id)
             if not title:
-                await _edit_text(query, context, "Title not found.")
+                await _edit_text(query, context, "Manga not found.")
                 return
 
             if not _can_manage(update.effective_user.id, title["created_by"]):
-                await _edit_text(query, context, "You cannot add episodes to this title.")
+                await _edit_text(query, context, "You cannot add episodes to this manga.")
                 return
             _reset_pending(context)
             context.user_data["pending_action"] = "bulk_add"
@@ -869,11 +869,11 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             page = int(parts[2])
             title = db.get_title(title_id)
             if not title:
-                await _edit_text(query, context, "Title not found.")
+                await _edit_text(query, context, "Manga not found.")
                 return
 
             if not _can_manage(update.effective_user.id, title["created_by"]):
-                await _edit_text(query, context, "You cannot access episodes from this title.")
+                await _edit_text(query, context, "You cannot access episodes from this manga.")
                 return
             episodes = db.get_episodes(title_id)
             if not episodes:
@@ -947,11 +947,11 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             title_id = int(action.split(":", 1)[1])
             title = db.get_title(title_id)
             if not title:
-                await _edit_text(query, context, "Title not found.")
+                await _edit_text(query, context, "Manga not found.")
                 return
 
             if not _can_manage(update.effective_user.id, title["created_by"]):
-                await _edit_text(query, context, "You cannot edit this title.")
+                await _edit_text(query, context, "You cannot edit this manga.")
                 return
             _reset_pending(context)
             context.user_data["pending_action"] = "edit_title"
@@ -959,7 +959,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await _edit_text(
                 query,
                 context,
-                f"{title['name']} - Send the new title name:",
+                f"{title['name']} - Send the new manga name:",
                 reply_markup=InlineKeyboardMarkup(
                     [[InlineKeyboardButton("Cancel", callback_data=f"admin:title:{title_id}")]]
                 ),
@@ -1012,18 +1012,18 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             title_id = int(action.split(":", 1)[1])
             title = db.get_title(title_id)
             if not title:
-                await _edit_text(query, context, "Title not found.")
+                await _edit_text(query, context, "Manga not found.")
                 return
 
             if not _can_manage(update.effective_user.id, title["created_by"]):
-                await _edit_text(query, context, "You cannot delete this title.")
+                await _edit_text(query, context, "You cannot delete this manga.")
                 return
             keyboard = [
                 [InlineKeyboardButton("Yes, delete", callback_data=f"admin:confirm_del_title:{title_id}")],
                 [InlineKeyboardButton("Cancel", callback_data=f"admin:title:{title_id}")],
             ]
             await _edit_text(query, context, 
-                f"Delete title '{title['name']}' and all episodes?",
+                f"Delete manga '{title['name']}' and all episodes?",
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
             return
@@ -1033,23 +1033,23 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             title_id = int(action.split(":", 1)[1])
             title = db.get_title(title_id)
             if not title:
-                await _edit_text(query, context, "Title not found.")
+                await _edit_text(query, context, "Manga not found.")
                 return
             if not _can_manage(update.effective_user.id, title["created_by"]):
-                await _edit_text(query, context, "You cannot delete this title.")
+                await _edit_text(query, context, "You cannot delete this manga.")
                 return
             deleted = db.delete_title(title_id)
             if deleted:
                 await _edit_text(
                     query,
                     context,
-                    "Title deleted.",
+                    "Manga deleted.",
                     reply_markup=InlineKeyboardMarkup(
                         [[InlineKeyboardButton("Back", callback_data="admin:manage")]]
                     ),
                 )
             else:
-                await _edit_text(query, context, "Title not found.")
+                await _edit_text(query, context, "Manga not found.")
             return
 
         if action.startswith("del_ep:"):
@@ -1122,7 +1122,7 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await _reply_text(
                 update,
                 context,
-                "Title already exists. Use existing title?",
+                "Manga already exists. Use existing manga?",
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
             return
@@ -1132,7 +1132,7 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 await _edit_text(
                     query,
                     context,
-                    "You cannot manage this title.",
+                    "You cannot manage this manga.",
                     reply_markup=InlineKeyboardMarkup(
                         [[InlineKeyboardButton("Back", callback_data="admin:manage")]]
                     ),
@@ -1143,8 +1143,8 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 [InlineKeyboardButton("Bulk add episodes", callback_data=f"admin:bulk_add:{title_id}")],
                 [InlineKeyboardButton("List episodes", callback_data=f"admin:eps:{title_id}:0")],
                 [InlineKeyboardButton("Copy all episodes", callback_data=f"admin:copy_eps:{title_id}")],
-                [InlineKeyboardButton("Edit title", callback_data=f"admin:edit_title:{title_id}")],
-                [InlineKeyboardButton("Delete title", callback_data=f"admin:del_title:{title_id}")],
+                [InlineKeyboardButton("Edit manga", callback_data=f"admin:edit_title:{title_id}")],
+                [InlineKeyboardButton("Delete manga", callback_data=f"admin:del_title:{title_id}")],
                 [InlineKeyboardButton("Back", callback_data="admin:manage")],
             ]
             await _edit_text(
@@ -1157,13 +1157,13 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         title_id = db.add_title(text, update.effective_user.id)
         _reset_pending(context)
         if title_id is None:
-            await _reply_text(update, context, "Title already exists.")
+            await _reply_text(update, context, "Manga already exists.")
         else:
             keyboard = [
                 [InlineKeyboardButton("Add episode", callback_data=f"admin:addep:{title_id}")],
                 [InlineKeyboardButton("Bulk add episodes", callback_data=f"admin:bulk_add:{title_id}")],
-                [InlineKeyboardButton("Edit title", callback_data=f"admin:edit_title:{title_id}")],
-                [InlineKeyboardButton("Delete title", callback_data=f"admin:del_title:{title_id}")],
+                [InlineKeyboardButton("Edit manga", callback_data=f"admin:edit_title:{title_id}")],
+                [InlineKeyboardButton("Delete manga", callback_data=f"admin:del_title:{title_id}")],
                 [InlineKeyboardButton("Back", callback_data="admin:manage")],
             ]
             await _reply_text(
@@ -1209,13 +1209,13 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await _reply_text(
                 update,
                 context,
-                "Title updated.",
+                "Manga updated.",
                 reply_markup=InlineKeyboardMarkup(
                     [[InlineKeyboardButton("Back", callback_data="admin:manage")]]
                 ),
             )
         else:
-            await _reply_text(update, context, "Title not found.")
+            await _reply_text(update, context, "Manga not found.")
         return
 
     if pending == "edit_ep_name":
@@ -1291,8 +1291,8 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("cancel", cancel))
-    app.add_handler(CommandHandler("linkmanga", linkmanga_command))
-    app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(CommandHandler("mangalink", mangalink_command))
+    app.add_handler(CommandHandler("mangaadmin", admin_command))
     app.add_handler(CommandHandler("addadmin", add_admin_command))
     app.add_handler(CommandHandler("removeadmin", remove_admin_command))
     app.add_handler(CommandHandler("getuserid", get_user_id_command))

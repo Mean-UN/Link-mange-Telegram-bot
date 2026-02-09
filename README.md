@@ -4,7 +4,7 @@ A Telegram bot to store titles, episodes, and links. Admins manage content via b
 
 ## Features
 
-- Add titles, episodes, and links
+- Add mangas, episodes, and links
 - Bulk add episodes by pasting many pairs (supports multi-message input)
 - Copy all episodes (name + link)
 - Role system: main admins from `.env` and added admins (limited to their own data)
@@ -39,13 +39,13 @@ python bot.py
 User:
 - `/start` - welcome & how to use
 - `/help` - show commands
-- `/linkmanga` - browse titles
+- `/mangalink` - browse manga
 - `/listep 1-10` - generate episode labels
 - `/getuserid` - get user ID (reply to a user to get their ID)
 - `/donateadmin` - show donation QR
 
 Admin:
-- `/admin` - admin panel
+- `/mangaadmin` - admin panel
 - `/addadmin <user_id>` - add admin (main admins only)
 - `/removeadmin <user_id>` - remove admin (main admins only)
 - `/listadmin` - list admins (main admins only)
