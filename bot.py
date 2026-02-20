@@ -24,9 +24,10 @@ logger = logging.getLogger("linkbot")
 
 db = Database(DB_PATH)
 
-AUTO_DELETE_SECONDS = 120
+AUTO_DELETE_SECONDS = 300
 EP_PAGE_SIZE = 30
 TITLE_PAGE_SIZE = 20
+ADMIN_AUTO_DELETE_KEY = "admin_auto_delete"
 EP_PREFIX = "\u1797\u17B6\u1782"
 LABEL_TITLES = "\u1794\u1789\u17D2\u1785\u17B8\u179A\u17BF\u1784\u17D6"
 LABEL_ALL_EPS = "\u1797\u17B6\u1782\u1791\u17B6\u17C6\u1784\u17A2\u179F\u17CB"
@@ -51,6 +52,17 @@ def _reset_pending(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("pending_title_id", None)
     context.user_data.pop("pending_ep_name", None)
     context.user_data.pop("pending_episode_id", None)
+
+
+def _set_admin_auto_delete(context: ContextTypes.DEFAULT_TYPE, enabled: bool) -> None:
+    if enabled:
+        context.user_data[ADMIN_AUTO_DELETE_KEY] = True
+    else:
+        context.user_data.pop(ADMIN_AUTO_DELETE_KEY, None)
+
+
+def _admin_auto_delete_enabled(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    return bool(context.user_data.get(ADMIN_AUTO_DELETE_KEY))
 
 
 def _valid_url(url: str) -> bool:
@@ -90,8 +102,10 @@ async def _delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
 
-def _schedule_delete(message, context: ContextTypes.DEFAULT_TYPE) -> None:
+def _schedule_delete(message, context: ContextTypes.DEFAULT_TYPE, force: bool = False) -> None:
     if not message:
+        return
+    if not force and not _admin_auto_delete_enabled(context):
         return
     if not getattr(context, "job_queue", None):
         return
@@ -181,6 +195,7 @@ async def _reply_to_query(query, context: ContextTypes.DEFAULT_TYPE, text: str, 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _reset_pending(context)
+    _set_admin_auto_delete(context, False)
     _schedule_delete(update.message, context)
     text = (
         "Welcome! This bot stores titles, episodes, and links.\n"
@@ -197,6 +212,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _reset_pending(context)
+    _set_admin_auto_delete(context, False)
     _schedule_delete(update.message, context)
     await _reply_text(
         update,
@@ -212,13 +228,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/mangaadmin - admin menu\n"
         "/addadmin <user_id> - add admin (main admins only)\n"
         "/removeadmin <user_id> - remove admin (main admins only)\n"
+        "/addmangaadmin <title> | <user_id/@username> - allow admin on one manga\n"
+        "/removemangaadmin <title> | <user_id/@username> - remove manga admin\n"
         "/listadmin - list admins (main admins only)\n"
         "/cancel - cancel current admin input\n"
         "/done - finish bulk add input\n"
         "\n"
         "Admin rules:\n"
         "- Main admins can manage all data.\n"
-        "- Added admins can only manage titles/episodes they created.\n"
+        "- Added admins can manage titles/episodes they created or were assigned.\n"
         "- Added admins cannot add/remove other admins.\n"
         "Developed by @Mean_Un"
     )
@@ -227,12 +245,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _reset_pending(context)
     context.user_data.pop("bulk_buffer", None)
+    _set_admin_auto_delete(context, False)
     _schedule_delete(update.message, context)
     await _reply_text(update, context, "Cancelled.")
 
 
 async def mangalink_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _reset_pending(context)
+    _set_admin_auto_delete(context, False)
     _schedule_delete(update.message, context)
     titles = db.get_titles()
     if not titles:
@@ -256,6 +276,7 @@ async def mangalink_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _reset_pending(context)
+    _set_admin_auto_delete(context, True)
     _schedule_delete(update.message, context)
     if not ADMIN_IDS:
         await _reply_text(update, context, "Admin list is empty. Set ADMIN_IDS in .env")
@@ -276,16 +297,24 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
-def _can_manage(user_id: int, created_by: int | None) -> bool:
+def _can_manage_title(user_id: int, title_id: int, created_by: int | None = None) -> bool:
     if user_id in ADMIN_IDS:
         return True
     if created_by is None:
+        title = db.get_title(title_id)
+        if not title:
+            return False
+        created_by = title["created_by"]
+    if created_by is None:
         return False
-    return user_id == created_by
+    if user_id == created_by:
+        return True
+    return db.has_manga_admin(title_id, user_id)
 
 
 async def add_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _reset_pending(context)
+    _set_admin_auto_delete(context, True)
     _schedule_delete(update.message, context)
     if not _is_super_admin(update):
         await _reply_text(update, context, "Only main admins can add admins.")
@@ -310,6 +339,7 @@ async def add_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def remove_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _reset_pending(context)
+    _set_admin_auto_delete(context, True)
     _schedule_delete(update.message, context)
     if not _is_super_admin(update):
         await _reply_text(update, context, "Only main admins can remove admins.")
@@ -332,7 +362,113 @@ async def remove_admin_command(update: Update, context: ContextTypes.DEFAULT_TYP
         await _reply_text(update, context, "Admin not found.")
 
 
+def _parse_manga_admin_args(args: list[str]) -> tuple[str, str] | None:
+    if not args:
+        return None
+    raw = " ".join(args).strip()
+    if "|" in raw:
+        title_name, user_arg = raw.rsplit("|", 1)
+        title_name = title_name.strip()
+        user_arg = user_arg.strip()
+        if title_name and user_arg:
+            return title_name, user_arg
+        return None
+    if len(args) < 2:
+        return None
+    title_name = " ".join(args[:-1]).strip()
+    user_arg = args[-1].strip()
+    if not title_name or not user_arg:
+        return None
+    return title_name, user_arg
+
+
+async def _resolve_user_id(context: ContextTypes.DEFAULT_TYPE, user_arg: str) -> int | None:
+    raw = user_arg.strip()
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    if raw.startswith("@"):
+        try:
+            chat = await context.bot.get_chat(raw)
+            return int(chat.id)
+        except Exception:
+            return None
+    return None
+
+
+async def add_manga_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _reset_pending(context)
+    _set_admin_auto_delete(context, True)
+    _schedule_delete(update.message, context)
+    if not _is_super_admin(update):
+        await _reply_text(update, context, "Only main admins can add manga admins.")
+        return
+    parsed = _parse_manga_admin_args(context.args)
+    if not parsed:
+        await _reply_text(
+            update,
+            context,
+            "Usage: /addmangaadmin <manga title> | <user_id or @username>\n"
+            "Example: /addmangaadmin One Piece | 123456789",
+        )
+        return
+    title_name, user_arg = parsed
+    title = db.get_title_by_name(title_name)
+    if not title:
+        await _reply_text(update, context, f"Manga not found: {title_name}")
+        return
+    user_id = await _resolve_user_id(context, user_arg)
+    if user_id is None:
+        await _reply_text(update, context, "Invalid user. Use numeric user ID or @username.")
+        return
+    if user_id in ADMIN_IDS:
+        await _reply_text(update, context, "That user is a main admin and already has full access.")
+        return
+    if user_id not in set(db.get_admin_ids()):
+        await _reply_text(update, context, "That user is not an added admin. Use /addadmin first.")
+        return
+    added = db.add_manga_admin(int(title["id"]), user_id)
+    if added:
+        await _reply_text(update, context, f"Added manga admin {user_id} for '{title['name']}'.")
+    else:
+        await _reply_text(update, context, f"User {user_id} already manages '{title['name']}'.")
+
+
+async def remove_manga_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _reset_pending(context)
+    _set_admin_auto_delete(context, True)
+    _schedule_delete(update.message, context)
+    if not _is_super_admin(update):
+        await _reply_text(update, context, "Only main admins can remove manga admins.")
+        return
+    parsed = _parse_manga_admin_args(context.args)
+    if not parsed:
+        await _reply_text(
+            update,
+            context,
+            "Usage: /removemangaadmin <manga title> | <user_id or @username>\n"
+            "Example: /removemangaadmin One Piece | 123456789",
+        )
+        return
+    title_name, user_arg = parsed
+    title = db.get_title_by_name(title_name)
+    if not title:
+        await _reply_text(update, context, f"Manga not found: {title_name}")
+        return
+    user_id = await _resolve_user_id(context, user_arg)
+    if user_id is None:
+        await _reply_text(update, context, "Invalid user. Use numeric user ID or @username.")
+        return
+    removed = db.remove_manga_admin(int(title["id"]), user_id)
+    if removed:
+        await _reply_text(update, context, f"Removed manga admin {user_id} from '{title['name']}'.")
+    else:
+        await _reply_text(update, context, f"User {user_id} was not assigned to '{title['name']}'.")
+
+
 async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _set_admin_auto_delete(context, True)
     _schedule_delete(update.message, context)
     if context.user_data.get("pending_action") != "bulk_add":
         await _reply_text(update, context, "Nothing to finish.")
@@ -403,6 +539,7 @@ async def _process_bulk_add(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 async def get_user_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _reset_pending(context)
+    _set_admin_auto_delete(context, False)
     _schedule_delete(update.message, context)
     target = update.message.reply_to_message.from_user if update.message and update.message.reply_to_message else update.effective_user
     if not target:
@@ -413,6 +550,7 @@ async def get_user_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def list_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _reset_pending(context)
+    _set_admin_auto_delete(context, True)
     _schedule_delete(update.message, context)
     if not _is_super_admin(update):
         await _reply_text(update, context, "Only main admins can list admins.")
@@ -447,6 +585,7 @@ def _to_khmer_digits(value: int, width: int = 2) -> str:
 
 async def list_ep_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _reset_pending(context)
+    _set_admin_auto_delete(context, False)
     _schedule_delete(update.message, context)
     if not context.args:
         await _reply_text(update, context, "Usage: /listep 1-10")
@@ -479,6 +618,7 @@ async def list_ep_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def donate_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _reset_pending(context)
+    _set_admin_auto_delete(context, False)
     _schedule_delete(update.message, context)
     if not update.message:
         return
@@ -499,6 +639,10 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     data = query.data or ""
     await query.answer()
+    if data.startswith("admin:"):
+        _set_admin_auto_delete(context, True)
+    elif data.startswith("user:"):
+        _set_admin_auto_delete(context, False)
 
     if data.startswith("user:title:"):
         title_id = int(data.split(":", 2)[2])
@@ -679,7 +823,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             if not title:
                 await _edit_text(query, context, "Manga not found.")
                 return
-            if not _can_manage(update.effective_user.id, title["created_by"]):
+            if not _can_manage_title(update.effective_user.id, int(title["id"]), title["created_by"]):
                 await _edit_text(
                     query,
                     context,
@@ -756,7 +900,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 await _edit_text(query, context, "Manga not found.")
                 return
 
-            if not _can_manage(update.effective_user.id, title["created_by"]):
+            if not _can_manage_title(update.effective_user.id, int(title["id"]), title["created_by"]):
                 await _edit_text(
                     query,
                     context,
@@ -790,7 +934,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 await _edit_text(query, context, "Manga not found.")
                 return
 
-            if not _can_manage(update.effective_user.id, title["created_by"]):
+            if not _can_manage_title(update.effective_user.id, int(title["id"]), title["created_by"]):
                 await _edit_text(query, context, "You cannot add episodes to this manga.")
                 return
             _reset_pending(context)
@@ -810,7 +954,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 await _edit_text(query, context, "Manga not found.")
                 return
 
-            if not _can_manage(update.effective_user.id, title["created_by"]):
+            if not _can_manage_title(update.effective_user.id, int(title["id"]), title["created_by"]):
                 await _edit_text(query, context, "You cannot access episodes from this manga.")
                 return
             episodes = db.get_episodes(title_id)
@@ -847,7 +991,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 await _edit_text(query, context, "Manga not found.")
                 return
 
-            if not _can_manage(update.effective_user.id, title["created_by"]):
+            if not _can_manage_title(update.effective_user.id, int(title["id"]), title["created_by"]):
                 await _edit_text(query, context, "You cannot add episodes to this manga.")
                 return
             _reset_pending(context)
@@ -872,7 +1016,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 await _edit_text(query, context, "Manga not found.")
                 return
 
-            if not _can_manage(update.effective_user.id, title["created_by"]):
+            if not _can_manage_title(update.effective_user.id, int(title["id"]), title["created_by"]):
                 await _edit_text(query, context, "You cannot access episodes from this manga.")
                 return
             episodes = db.get_episodes(title_id)
@@ -919,7 +1063,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 await _edit_text(query, context, "Episode not found.")
                 return
 
-            if not _can_manage(update.effective_user.id, ep["created_by"]):
+            if not _can_manage_title(update.effective_user.id, int(ep["title_id"])):
                 await _edit_text(query, context, "You cannot manage this episode.")
                 return
             prev_id = db.get_prev_episode_id(ep["title_id"], episode_id)
@@ -950,7 +1094,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 await _edit_text(query, context, "Manga not found.")
                 return
 
-            if not _can_manage(update.effective_user.id, title["created_by"]):
+            if not _can_manage_title(update.effective_user.id, int(title["id"]), title["created_by"]):
                 await _edit_text(query, context, "You cannot edit this manga.")
                 return
             _reset_pending(context)
@@ -973,7 +1117,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 await _edit_text(query, context, "Episode not found.")
                 return
 
-            if not _can_manage(update.effective_user.id, ep["created_by"]):
+            if not _can_manage_title(update.effective_user.id, int(ep["title_id"])):
                 await _edit_text(query, context, "You cannot edit this episode.")
                 return
             _reset_pending(context)
@@ -994,7 +1138,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 await _edit_text(query, context, "Episode not found.")
                 return
 
-            if not _can_manage(update.effective_user.id, ep["created_by"]):
+            if not _can_manage_title(update.effective_user.id, int(ep["title_id"])):
                 await _edit_text(query, context, "You cannot edit this episode.")
                 return
             _reset_pending(context)
@@ -1015,7 +1159,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 await _edit_text(query, context, "Manga not found.")
                 return
 
-            if not _can_manage(update.effective_user.id, title["created_by"]):
+            if not _can_manage_title(update.effective_user.id, int(title["id"]), title["created_by"]):
                 await _edit_text(query, context, "You cannot delete this manga.")
                 return
             keyboard = [
@@ -1035,7 +1179,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             if not title:
                 await _edit_text(query, context, "Manga not found.")
                 return
-            if not _can_manage(update.effective_user.id, title["created_by"]):
+            if not _can_manage_title(update.effective_user.id, int(title["id"]), title["created_by"]):
                 await _edit_text(query, context, "You cannot delete this manga.")
                 return
             deleted = db.delete_title(title_id)
@@ -1059,7 +1203,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 await _edit_text(query, context, "Episode not found.")
                 return
 
-            if not _can_manage(update.effective_user.id, ep["created_by"]):
+            if not _can_manage_title(update.effective_user.id, int(ep["title_id"])):
                 await _edit_text(query, context, "You cannot delete this episode.")
                 return
             keyboard = [
@@ -1079,7 +1223,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 await _edit_text(query, context, "Episode not found.")
                 return
 
-            if not _can_manage(update.effective_user.id, ep["created_by"]):
+            if not _can_manage_title(update.effective_user.id, int(ep["title_id"])):
                 await _edit_text(query, context, "You cannot delete this episode.")
                 return
             title_id = ep["title_id"]
@@ -1100,11 +1244,11 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not _is_admin(update):
         return
 
-    _schedule_delete(update.message, context)
-
     pending = context.user_data.get("pending_action")
     if not pending:
         return
+    _set_admin_auto_delete(context, True)
+    _schedule_delete(update.message, context)
 
     text = (update.message.text or "").strip()
     if not text:
@@ -1128,7 +1272,7 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return
 
         
-            if not _can_manage(update.effective_user.id, title["created_by"]):
+            if not _can_manage_title(update.effective_user.id, int(title["id"]), title["created_by"]):
                 await _edit_text(
                     query,
                     context,
@@ -1295,6 +1439,8 @@ def main() -> None:
     app.add_handler(CommandHandler("mangaadmin", admin_command))
     app.add_handler(CommandHandler("addadmin", add_admin_command))
     app.add_handler(CommandHandler("removeadmin", remove_admin_command))
+    app.add_handler(CommandHandler("addmangaadmin", add_manga_admin_command))
+    app.add_handler(CommandHandler("removemangaadmin", remove_manga_admin_command))
     app.add_handler(CommandHandler("getuserid", get_user_id_command))
     app.add_handler(CommandHandler("listadmin", list_admin_command))
     app.add_handler(CommandHandler("listep", list_ep_command))

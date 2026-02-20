@@ -53,6 +53,17 @@ class Database:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS manga_admins (
+                    title_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (title_id, user_id),
+                    FOREIGN KEY(title_id) REFERENCES titles(id) ON DELETE CASCADE
+                )
+                """
+            )
             # Lightweight migration for older DBs missing created_by columns
             self._ensure_column(conn, "titles", "created_by", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "episodes", "created_by", "INTEGER NOT NULL DEFAULT 0")
@@ -202,3 +213,31 @@ class Database:
         with self._conn() as conn:
             cur = conn.execute("SELECT user_id FROM admins ORDER BY user_id ASC")
             return [int(row["user_id"]) for row in cur.fetchall()]
+
+    def add_manga_admin(self, title_id: int, user_id: int) -> bool:
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        with self._conn() as conn:
+            try:
+                conn.execute(
+                    "INSERT INTO manga_admins (title_id, user_id, created_at) VALUES (?, ?, ?)",
+                    (title_id, user_id, now),
+                )
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+    def remove_manga_admin(self, title_id: int, user_id: int) -> bool:
+        with self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM manga_admins WHERE title_id = ? AND user_id = ?",
+                (title_id, user_id),
+            )
+            return cur.rowcount > 0
+
+    def has_manga_admin(self, title_id: int, user_id: int) -> bool:
+        with self._conn() as conn:
+            cur = conn.execute(
+                "SELECT 1 FROM manga_admins WHERE title_id = ? AND user_id = ? LIMIT 1",
+                (title_id, user_id),
+            )
+            return cur.fetchone() is not None
