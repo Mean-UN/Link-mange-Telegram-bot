@@ -228,6 +228,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "\n"
         "Admin commands:\n"
         "/mangaadmin - admin menu\n"
+        "/searchbyadmin <keyword> - find manga you can manage\n"
         "/addadmin <user_id> - add admin (main admins only)\n"
         "/removeadmin <user_id> - remove admin (main admins only)\n"
         "/addmangaadmin <title> | <user_id/@username> - allow admin on one manga\n"
@@ -303,6 +304,51 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         for t in shown
     ]
     text = f"Search results for '{query}' ({len(matched)} found):"
+    if len(matched) > TITLE_PAGE_SIZE:
+        text += f"\nShowing first {TITLE_PAGE_SIZE}. Refine your keyword for fewer results."
+    await _reply_text(update, context, text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def search_by_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _reset_pending(context)
+    _set_admin_auto_delete(context, True)
+    _schedule_delete(update.message, context)
+
+    if not _is_admin(update):
+        await _reply_text(update, context, "You are not an admin.")
+        return
+
+    query = " ".join(context.args).strip()
+    if not query:
+        await _reply_text(update, context, "Usage: /searchbyadmin <keyword>")
+        return
+
+    user = update.effective_user
+    if not user:
+        await _reply_text(update, context, "User not found.")
+        return
+
+    titles = db.get_titles()
+    if not titles:
+        await _reply_text(update, context, "No manga yet.")
+        return
+
+    q = query.casefold()
+    matched = [
+        t for t in titles
+        if q in str(t["name"]).casefold() and _can_manage_title(user.id, int(t["id"]), t["created_by"])
+    ]
+    if not matched:
+        await _reply_text(update, context, f"No manageable manga found for: {query}")
+        return
+
+    shown = matched[:TITLE_PAGE_SIZE]
+    keyboard = [
+        [InlineKeyboardButton(t["name"], callback_data=f"admin:title:{t['id']}")]
+        for t in shown
+    ]
+    keyboard.append([InlineKeyboardButton("Back to admin panel", callback_data="admin:back")])
+    text = f"Manageable results for '{query}' ({len(matched)} found):"
     if len(matched) > TITLE_PAGE_SIZE:
         text += f"\nShowing first {TITLE_PAGE_SIZE}. Refine your keyword for fewer results."
     await _reply_text(update, context, text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1485,6 +1531,7 @@ def main() -> None:
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("mangalink", mangalink_command))
     app.add_handler(CommandHandler("search", search_command))
+    app.add_handler(CommandHandler("searchbyadmin", search_by_admin_command))
     app.add_handler(CommandHandler("mangaadmin", admin_command))
     app.add_handler(CommandHandler("addadmin", add_admin_command))
     app.add_handler(CommandHandler("removeadmin", remove_admin_command))
