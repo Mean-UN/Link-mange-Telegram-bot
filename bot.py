@@ -201,6 +201,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Welcome! This bot stores titles, episodes, and links.\n"
         "How to use:\n"
         "- Use /mangalink to browse manga and open episode links.\n"
+        "- Use /search <keyword> to find manga quickly.\n"
         "- Use /listep 1-10 to generate episode labels (optional).\n"
         "- Use /getuserid to get a user ID (reply to a message to get that user).\n"
         "- Use /donateadmin to show the donation QR code.\n"
@@ -220,6 +221,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "User commands:\n"
         "/start - welcome & how to use\n"
         "/mangalink - show manga\n"
+        "/search <keyword> - search manga title\n"
         "/listep 1-10 - generate episode labels\n"
         "/getuserid - get user ID (reply to a message)\n"
         "/donateadmin - show donation QR code\n"
@@ -272,6 +274,52 @@ async def mangalink_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if nav:
         keyboard.append(nav)
     await _reply_text(update, context, LABEL_TITLES, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _reset_pending(context)
+    _set_admin_auto_delete(context, False)
+    _schedule_delete(update.message, context)
+
+    query = " ".join(context.args).strip()
+    if not query:
+        await _reply_text(update, context, "Usage: /search <keyword>")
+        return
+
+    titles = db.get_titles()
+    if not titles:
+        await _reply_text(update, context, "No manga yet.")
+        return
+
+    q = query.casefold()
+    matched = [t for t in titles if q in str(t["name"]).casefold()]
+    if not matched:
+        await _reply_text(update, context, f"No manga found for: {query}")
+        return
+
+    shown = matched[:TITLE_PAGE_SIZE]
+    keyboard = [
+        [InlineKeyboardButton(t["name"], callback_data=f"user:title:{t['id']}")]
+        for t in shown
+    ]
+    text = f"Search results for '{query}' ({len(matched)} found):"
+    if len(matched) > TITLE_PAGE_SIZE:
+        text += f"\nShowing first {TITLE_PAGE_SIZE}. Refine your keyword for fewer results."
+    await _reply_text(update, context, text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def auto_delete_join_leave_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message:
+        return
+
+    if not (message.new_chat_members or message.left_chat_member):
+        return
+
+    try:
+        await context.bot.delete_message(chat_id=message.chat_id, message_id=message.message_id)
+    except Exception:
+        return
 
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1436,6 +1484,7 @@ def main() -> None:
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("mangalink", mangalink_command))
+    app.add_handler(CommandHandler("search", search_command))
     app.add_handler(CommandHandler("mangaadmin", admin_command))
     app.add_handler(CommandHandler("addadmin", add_admin_command))
     app.add_handler(CommandHandler("removeadmin", remove_admin_command))
@@ -1447,6 +1496,12 @@ def main() -> None:
     app.add_handler(CommandHandler("donateadmin", donate_admin_command))
     app.add_handler(CommandHandler("done", done_command))
     app.add_handler(CallbackQueryHandler(handle_callbacks))
+    app.add_handler(
+        MessageHandler(
+            filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.StatusUpdate.LEFT_CHAT_MEMBER,
+            auto_delete_join_leave_message,
+        )
+    )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_text))
 
     logger.info("Link bot is running")
