@@ -108,6 +108,61 @@ class Database:
             )
             return cur.fetchone()
 
+    def search_titles_by_keyword(self, keyword: str) -> list[sqlite3.Row]:
+        like = f"%{keyword.strip()}%"
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                SELECT id, name, created_by
+                FROM titles
+                WHERE name LIKE ? COLLATE NOCASE
+                ORDER BY name ASC
+                """,
+                (like,),
+            )
+            return list(cur.fetchall())
+
+    def get_manga_update_counts_since(self, start_iso: str) -> list[sqlite3.Row]:
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                SELECT
+                    t.id AS title_id,
+                    t.name AS title_name,
+                    COUNT(e.id) AS added_episodes,
+                    (
+                        SELECT COUNT(*)
+                        FROM episodes e_all
+                        WHERE e_all.title_id = t.id
+                    ) AS total_episodes
+                FROM episodes e
+                JOIN titles t ON t.id = e.title_id
+                WHERE e.created_at >= ?
+                GROUP BY t.id, t.name
+                ORDER BY added_episodes DESC, t.name ASC
+                """,
+                (start_iso,),
+            )
+            return list(cur.fetchall())
+
+    def get_last_update_for_title(self, title_id: int) -> sqlite3.Row | None:
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                SELECT
+                    t.id AS title_id,
+                    t.name AS title_name,
+                    MAX(e.created_at) AS last_update_at,
+                    COUNT(e.id) AS total_links
+                FROM titles t
+                LEFT JOIN episodes e ON e.title_id = t.id
+                WHERE t.id = ?
+                GROUP BY t.id, t.name
+                """,
+                (title_id,),
+            )
+            return cur.fetchone()
+
     def add_episode(self, title_id: int, name: str, url: str, created_by: int) -> int:
         now = datetime.utcnow().isoformat(timespec="seconds")
         with self._conn() as conn:

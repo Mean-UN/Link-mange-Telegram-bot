@@ -1,8 +1,11 @@
 import io
 import logging
 import re
+import time
+from datetime import datetime, timedelta
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest, NetworkError, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -32,6 +35,8 @@ EP_PREFIX = "\u1797\u17B6\u1782"
 LABEL_TITLES = "\u1794\u1789\u17D2\u1785\u17B8\u179A\u17BF\u1784\u17D6"
 LABEL_ALL_EPS = "\u1797\u17B6\u1782\u1791\u17B6\u17C6\u1784\u17A2\u179F\u17CB"
 DONATE_IMAGE_PATH = "donate_qr.png"
+CAMBODIA_UTC_OFFSET_HOURS = 7
+STARTUP_RETRY_SECONDS = 10
 
 
 def _is_super_admin(update: Update) -> bool:
@@ -198,15 +203,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _set_admin_auto_delete(context, False)
     _schedule_delete(update.message, context)
     text = (
-        "Welcome! This bot stores titles, episodes, and links.\n"
-        "How to use:\n"
-        "- Use /mangalink to browse manga and open episode links.\n"
-        "- Use /search <keyword> to find manga quickly.\n"
-        "- Use /listep 1-10 to generate episode labels (optional).\n"
-        "- Use /getuserid to get a user ID (reply to a message to get that user).\n"
-        "- Use /donateadmin to show the donation QR code.\n"
-        "Admins can use /mangaadmin to manage manga and episodes."
-        "\nDeveloped by @Mean_Un"
+        "📚 𝗪𝗲𝗹𝗰𝗼𝗺𝗲 𝘁𝗼 𝗟𝗶𝗻𝗸 𝗕𝗼𝘁\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "Store manga, episodes, and links in one place.\n\n"
+        "🚀 Quick Start\n"
+        "• /mangalink - browse manga and open links\n"
+        "• /listmanga - view all manga titles\n"
+        "• /search <keyword> - find manga fast\n"
+        "• /mangaupdated [n] - see recent updates\n"
+        "• /lastupdate <manga title> - latest update time\n\n"
+        "🧰 Useful Tools\n"
+        "• /listep 1-10 - generate episode labels\n"
+        "• /getuserid - get your ID or replied user's ID\n"
+        "\n"
+        "🔐 Admin: /mangaadmin\n"
+        "💖 Support: /donateadmin\n"
+        "👨‍💻 Developed by @Mean_Un"
     )
     await _reply_text(update, context, text)
 
@@ -218,30 +230,35 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _reply_text(
         update,
         context,
-        "User commands:\n"
-        "/start - welcome & how to use\n"
-        "/mangalink - show manga\n"
-        "/search <keyword> - search manga title\n"
-        "/listep 1-10 - generate episode labels\n"
-        "/getuserid - get user ID (reply to a message)\n"
-        "/donateadmin - show donation QR code\n"
+        "📖 𝗛𝗲𝗹𝗽 𝗠𝗲𝗻𝘂\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "👤 User Commands\n"
+        "• /start - welcome message\n"
+        "• /mangalink - browse manga\n"
+        "• /listmanga - list all manga\n"
+        "• /search <keyword> - search manga title\n"
+        "• /mangaupdated [n] - manga/link updates by day range\n"
+        "• /lastupdate <manga title> - show latest update of one manga\n"
+        "• /listep 1-10 - generate episode labels\n"
+        "• /getuserid - get user ID\n"
         "\n"
-        "Admin commands:\n"
-        "/mangaadmin - admin menu\n"
-        "/searchbyadmin <keyword> - find manga you can manage\n"
-        "/addadmin <user_id> - add admin (main admins only)\n"
-        "/removeadmin <user_id> - remove admin (main admins only)\n"
-        "/addmangaadmin <title> | <user_id/@username> - allow admin on one manga\n"
-        "/removemangaadmin <title> | <user_id/@username> - remove manga admin\n"
-        "/listadmin - list admins (main admins only)\n"
-        "/cancel - cancel current admin input\n"
-        "/done - finish bulk add input\n"
-        "\n"
-        "Admin rules:\n"
-        "- Main admins can manage all data.\n"
-        "- Added admins can manage titles/episodes they created or were assigned.\n"
-        "- Added admins cannot add/remove other admins.\n"
-        "Developed by @Mean_Un"
+        "🛠️ Admin Commands\n"
+        "• /mangaadmin - admin panel\n"
+        "• /searchbyadmin <keyword> - search manageable manga\n"
+        "• /addadmin <user_id> - add admin (main admins only)\n"
+        "• /removeadmin <user_id> - remove admin (main admins only)\n"
+        "• /addmangaadmin <title> | <user_id/@username>\n"
+        "• /removemangaadmin <title> | <user_id/@username>\n"
+        "• /listadmin - list admins (main admins only)\n"
+        "• /cancel - cancel current admin input\n"
+        "• /done - finish bulk add input\n\n"
+        "📌 Admin Rules\n"
+        "• Main admins can manage all data\n"
+        "• Added admins manage only assigned/created manga\n"
+        "• Added admins cannot add/remove other admins\n\n"
+        "💖 Support\n"
+        "• /donateadmin - donation QR\n\n"
+        "👨‍💻 Developed by @Mean_Un"
     )
 
 
@@ -249,8 +266,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _reset_pending(context)
     context.user_data.pop("bulk_buffer", None)
     _set_admin_auto_delete(context, False)
-    _schedule_delete(update.message, context)
-    await _reply_text(update, context, "Cancelled.")
+    _schedule_delete(update.message, context, force=True)
+    msg = await _reply_text(update, context, "Cancelled.")
+    _schedule_delete(msg, context, force=True)
 
 
 async def mangalink_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -275,6 +293,22 @@ async def mangalink_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if nav:
         keyboard.append(nav)
     await _reply_text(update, context, LABEL_TITLES, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def list_manga_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _reset_pending(context)
+    _set_admin_auto_delete(context, False)
+    _schedule_delete(update.message, context)
+
+    titles = db.get_titles()
+    if not titles:
+        await _reply_text(update, context, "No manga yet.")
+        return
+
+    lines = ["📚 Manga List", "━━━━━━━━━━━━━━━━━━"]
+    for idx, title in enumerate(titles, start=1):
+        lines.append(f"{idx}. {title['name']}")
+    await _send_long_text(update, context, "\n".join(lines))
 
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -352,6 +386,128 @@ async def search_by_admin_command(update: Update, context: ContextTypes.DEFAULT_
     if len(matched) > TITLE_PAGE_SIZE:
         text += f"\nShowing first {TITLE_PAGE_SIZE}. Refine your keyword for fewer results."
     await _reply_text(update, context, text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def manga_updated_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _reset_pending(context)
+    _set_admin_auto_delete(context, False)
+    _schedule_delete(update.message, context)
+
+    days_back = 0
+    if context.args:
+        if len(context.args) > 1:
+            await _reply_text(update, context, "Usage: /mangaupdated [n]\nExample: /mangaupdated 1")
+            return
+        try:
+            days_back = int(context.args[0])
+        except ValueError:
+            await _reply_text(update, context, "n must be a number. Example: /mangaupdated 2")
+            return
+        if days_back < 0:
+            await _reply_text(update, context, "n must be 0 or higher.")
+            return
+
+    now_utc = datetime.utcnow()
+    now_kh = now_utc + timedelta(hours=CAMBODIA_UTC_OFFSET_HOURS)
+    today_kh = now_kh.date()
+    start_date = today_kh - timedelta(days=days_back)
+    start_kh_dt = datetime.combine(start_date, datetime.min.time())
+    start_utc_dt = start_kh_dt - timedelta(hours=CAMBODIA_UTC_OFFSET_HOURS)
+    start_iso = start_utc_dt.isoformat(timespec="seconds")
+    rows = db.get_manga_update_counts_since(start_iso)
+
+    if days_back == 0:
+        header = (
+            "📊 𝗠𝗮𝗻𝗴𝗮 𝗨𝗽𝗱𝗮𝘁𝗲 𝗥𝗲𝗽𝗼𝗿𝘁\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"🗓️ Date: {today_kh.isoformat()}\n"
+            "📆 Today"
+        )
+    else:
+        header = (
+            "📊 𝗠𝗮𝗻𝗴𝗮 𝗨𝗽𝗱𝗮𝘁𝗲 𝗥𝗲𝗽𝗼𝗿𝘁\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"🗓️ Range: {start_date.isoformat()} to {today_kh.isoformat()}\n"
+            f"📆 {days_back + 1} day(s)"
+        )
+
+    if not rows:
+        await _reply_text(
+            update,
+            context,
+            f"{header}\n📚 Manga updated: 0\n🔗 Links updated: 0\n━━━━━━━━━━━━━━━━━━\nNo updates in this period.",
+        )
+        return
+
+    total_added_episodes = sum(int(row["added_episodes"]) for row in rows)
+    lines = [
+        header,
+        f"📚 Manga updated: {len(rows)}",
+        f"🔗 Links updated: {total_added_episodes}",
+        "━━━━━━━━━━━━━━━━━━",
+    ]
+    for idx, row in enumerate(rows, start=1):
+        lines.append(f"{idx}. {row['title_name']}")
+        lines.append(f"   🔗 Added {row['added_episodes']} Links")
+    await _send_long_text(update, context, "\n".join(lines))
+
+
+async def last_update_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _reset_pending(context)
+    _set_admin_auto_delete(context, False)
+    _schedule_delete(update.message, context)
+
+    raw = " ".join(context.args).strip()
+    if not raw:
+        await _reply_text(update, context, "Usage: /lastupdate <manga title>")
+        return
+
+    matches = db.search_titles_by_keyword(raw)
+    if not matches:
+        await _reply_text(update, context, f"Manga not found: {raw}")
+        return
+
+    picked = next((t for t in matches if str(t["name"]).casefold() == raw.casefold()), None)
+    if not picked and len(matches) == 1:
+        picked = matches[0]
+
+    if not picked:
+        names = "\n".join(f"- {t['name']}" for t in matches[:10])
+        suffix = "\n..." if len(matches) > 10 else ""
+        await _reply_text(
+            update,
+            context,
+            f"Multiple manga matched '{raw}'. Please use full title:\n{names}{suffix}",
+        )
+        return
+
+    stat = db.get_last_update_for_title(int(picked["id"]))
+    if not stat or not stat["last_update_at"]:
+        await _reply_text(
+            update,
+            context,
+            "🕒 𝗠𝗮𝗻𝗴𝗮 𝗟𝗮𝘀𝘁 𝗨𝗽𝗱𝗮𝘁𝗲\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"📚 Title: {picked['name']}\n"
+            "🕐 Last update: No links yet\n"
+            "🔗 Total links: 0",
+        )
+        return
+
+    last_update_utc = datetime.fromisoformat(str(stat["last_update_at"]))
+    last_update_kh = last_update_utc + timedelta(hours=CAMBODIA_UTC_OFFSET_HOURS)
+    now_kh = datetime.utcnow() + timedelta(hours=CAMBODIA_UTC_OFFSET_HOURS)
+    days_ago = (now_kh.date() - last_update_kh.date()).days
+    await _reply_text(
+        update,
+        context,
+        "🕒 𝗠𝗮𝗻𝗴𝗮 𝗟𝗮𝘀𝘁 𝗨𝗽𝗱𝗮𝘁𝗲\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"📚 Title: {stat['title_name']}\n"
+        f"🕐 Last update: {last_update_kh.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"📆 Count day ago: {days_ago} day(s)\n"
+        f"🔗 Total links: {stat['total_links']}",
+    )
 
 
 async def auto_delete_join_leave_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -563,15 +719,17 @@ async def remove_manga_admin_command(update: Update, context: ContextTypes.DEFAU
 
 async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _set_admin_auto_delete(context, True)
-    _schedule_delete(update.message, context)
+    _schedule_delete(update.message, context, force=True)
     if context.user_data.get("pending_action") != "bulk_add":
-        await _reply_text(update, context, "Nothing to finish.")
+        msg = await _reply_text(update, context, "Nothing to finish.")
+        _schedule_delete(msg, context, force=True)
         return
     buffer = context.user_data.get("bulk_buffer", "")
     if not buffer.strip():
         _reset_pending(context)
         context.user_data.pop("bulk_buffer", None)
-        await _reply_text(update, context, "No bulk data received.")
+        msg = await _reply_text(update, context, "No bulk data received.")
+        _schedule_delete(msg, context, force=True)
         return
     # Reuse bulk add parsing by sending through handler
     await _process_bulk_add(update, context, buffer)
@@ -727,12 +885,31 @@ async def donate_admin_command(update: Update, context: ContextTypes.DEFAULT_TYP
         await _reply_text(update, context, f"Donation QR image not found: {DONATE_IMAGE_PATH}")
 
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    exc = context.error
+    if isinstance(exc, (TimedOut, NetworkError)):
+        logger.warning("Telegram network timeout: %s", exc)
+        return
+    if isinstance(exc, BadRequest) and "Query is too old" in str(exc):
+        logger.info("Ignored expired callback query.")
+        return
+    logger.exception("Unhandled exception while processing update", exc_info=exc)
+
+
 async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query:
         return
     data = query.data or ""
-    await query.answer()
+    try:
+        await query.answer()
+    except BadRequest as exc:
+        # Happens when button press is too old; safe to ignore.
+        if "Query is too old" in str(exc) or "query id is invalid" in str(exc):
+            return
+        raise
+    except (TimedOut, NetworkError):
+        return
     if data.startswith("admin:"):
         _set_admin_auto_delete(context, True)
     elif data.startswith("user:"):
@@ -1067,7 +1244,8 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 name = _display_ep_name(ep["name"]).strip().replace("\n", " ")
                 url = ep["url"].strip().replace("\n", "")
                 pairs.append(f"{name}\n{url}")
-            text_out = "\n".join(pairs)
+            # Keep visual "#Link..." text but prevent Telegram hashtag parsing.
+            text_out = f"#\u200bLinkរឿង៖\n{title['name']}\n" + "\n".join(pairs)
             if len(text_out) <= 3500:
                 await _reply_to_query(query, context, text_out)
             else:
@@ -1524,13 +1702,24 @@ def main() -> None:
     if not BOT_TOKEN:
         raise SystemExit("BOT_TOKEN is missing. Set it in your environment or .env")
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .get_updates_connect_timeout(20)
+        .get_updates_read_timeout(30)
+        .get_updates_write_timeout(30)
+        .get_updates_pool_timeout(30)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("mangalink", mangalink_command))
+    app.add_handler(CommandHandler("listmanga", list_manga_command))
     app.add_handler(CommandHandler("search", search_command))
+    app.add_handler(CommandHandler("mangaupdated", manga_updated_command))
+    app.add_handler(CommandHandler("lastupdate", last_update_command))
     app.add_handler(CommandHandler("searchbyadmin", search_by_admin_command))
     app.add_handler(CommandHandler("mangaadmin", admin_command))
     app.add_handler(CommandHandler("addadmin", add_admin_command))
@@ -1550,9 +1739,22 @@ def main() -> None:
         )
     )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_text))
+    app.add_error_handler(error_handler)
 
-    logger.info("Link bot is running")
-    app.run_polling()
+    while True:
+        try:
+            logger.info("Link bot is running")
+            app.run_polling(
+                bootstrap_retries=-1,
+            )
+            break
+        except (TimedOut, NetworkError) as exc:
+            logger.warning(
+                "Network timeout while connecting to Telegram API (%s). Retrying in %s seconds...",
+                exc.__class__.__name__,
+                STARTUP_RETRY_SECONDS,
+            )
+            time.sleep(STARTUP_RETRY_SECONDS)
 
 
 if __name__ == "__main__":
