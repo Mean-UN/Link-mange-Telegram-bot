@@ -245,6 +245,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "🛠️ Admin Commands\n"
         "• /mangaadmin - admin panel\n"
         "• /searchbyadmin <keyword> - search manageable manga\n"
+        "• /findduplicatelink - find same links used in episodes\n"
         "• /addadmin <user_id> - add admin (main admins only)\n"
         "• /removeadmin <user_id> - remove admin (main admins only)\n"
         "• /addmangaadmin <title> | <user_id/@username>\n"
@@ -883,6 +884,39 @@ async def donate_admin_command(update: Update, context: ContextTypes.DEFAULT_TYP
         _schedule_delete(msg, context)
     except FileNotFoundError:
         await _reply_text(update, context, f"Donation QR image not found: {DONATE_IMAGE_PATH}")
+
+
+async def find_duplicate_link_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _reset_pending(context)
+    _set_admin_auto_delete(context, True)
+    _schedule_delete(update.message, context)
+
+    if not _is_admin(update):
+        await _reply_text(update, context, "You are not an admin.")
+        return
+
+    rows = db.get_duplicate_link_usages()
+    if not rows:
+        await _reply_text(update, context, "No duplicate links found.")
+        return
+
+    groups: dict[str, list] = {}
+    counts: dict[str, int] = {}
+    for row in rows:
+        url = str(row["url"])
+        groups.setdefault(url, []).append(row)
+        counts[url] = int(row["duplicate_count"])
+
+    lines = ["🔎 Duplicate Link Report", "━━━━━━━━━━━━━━━━━━", f"Duplicate links found: {len(groups)}", ""]
+    for idx, (url, usages) in enumerate(groups.items(), start=1):
+        lines.append(f"{idx}. 🔗 {url}")
+        lines.append(f"   Used: {counts[url]} time(s)")
+        for usage in usages:
+            ep_name = _display_ep_name(str(usage["episode_name"]))
+            lines.append(f"   - {usage['title_name']} | {ep_name} (ep_id={usage['episode_id']})")
+        lines.append("")
+
+    await _send_long_text(update, context, "\n".join(lines).strip())
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1721,6 +1755,7 @@ def main() -> None:
     app.add_handler(CommandHandler("mangaupdated", manga_updated_command))
     app.add_handler(CommandHandler("lastupdate", last_update_command))
     app.add_handler(CommandHandler("searchbyadmin", search_by_admin_command))
+    app.add_handler(CommandHandler("findduplicatelink", find_duplicate_link_command))
     app.add_handler(CommandHandler("mangaadmin", admin_command))
     app.add_handler(CommandHandler("addadmin", add_admin_command))
     app.add_handler(CommandHandler("removeadmin", remove_admin_command))

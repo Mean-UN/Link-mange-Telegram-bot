@@ -163,6 +163,30 @@ class Database:
             )
             return cur.fetchone()
 
+    def get_duplicate_link_usages(self) -> list[sqlite3.Row]:
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                SELECT
+                    e.url AS url,
+                    e.id AS episode_id,
+                    e.name AS episode_name,
+                    t.id AS title_id,
+                    t.name AS title_name,
+                    dup.cnt AS duplicate_count
+                FROM episodes e
+                JOIN titles t ON t.id = e.title_id
+                JOIN (
+                    SELECT url, COUNT(*) AS cnt
+                    FROM episodes
+                    GROUP BY url
+                    HAVING COUNT(*) > 1
+                ) dup ON dup.url = e.url
+                ORDER BY dup.cnt DESC, e.url ASC, t.name ASC, e.id ASC
+                """
+            )
+            return list(cur.fetchall())
+
     def add_episode(self, title_id: int, name: str, url: str, created_by: int) -> int:
         now = datetime.utcnow().isoformat(timespec="seconds")
         with self._conn() as conn:
