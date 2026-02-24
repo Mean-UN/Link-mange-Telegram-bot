@@ -913,7 +913,7 @@ async def find_duplicate_link_command(update: Update, context: ContextTypes.DEFA
         lines.append(f"   Used: {counts[url]} time(s)")
         for usage in usages:
             ep_name = _display_ep_name(str(usage["episode_name"]))
-            lines.append(f"   - {usage['title_name']} | {ep_name} (ep_id={usage['episode_id']})")
+            lines.append(f"   - {usage['title_name']} | {ep_name}")
         lines.append("")
 
     await _send_long_text(update, context, "\n".join(lines).strip())
