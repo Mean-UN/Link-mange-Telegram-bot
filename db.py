@@ -75,6 +75,27 @@ class Database:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS usage_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    command TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS manga_views (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(title_id) REFERENCES titles(id) ON DELETE CASCADE
+                )
+                """
+            )
             # Lightweight migration for older DBs missing created_by columns
             self._ensure_column(conn, "titles", "created_by", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "episodes", "created_by", "INTEGER NOT NULL DEFAULT 0")
@@ -367,6 +388,60 @@ class Database:
                 SELECT id, actor_id, action, details, created_at
                 FROM audit_logs
                 ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            return list(cur.fetchall())
+
+    def add_usage_log(self, user_id: int, command: str) -> int:
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        with self._conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO usage_logs (user_id, command, created_at) VALUES (?, ?, ?)",
+                (user_id, command, now),
+            )
+            return int(cur.lastrowid)
+
+    def get_top_users_for_month(self, month_prefix: str, command: str, limit: int) -> list[sqlite3.Row]:
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                SELECT
+                    user_id,
+                    COUNT(*) AS usage_count
+                FROM usage_logs
+                WHERE created_at LIKE ? || '%'
+                  AND command = ?
+                GROUP BY user_id
+                ORDER BY usage_count DESC, user_id ASC
+                LIMIT ?
+                """,
+                (month_prefix, command, limit),
+            )
+            return list(cur.fetchall())
+
+    def add_manga_view(self, title_id: int, user_id: int) -> int:
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        with self._conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO manga_views (title_id, user_id, created_at) VALUES (?, ?, ?)",
+                (title_id, user_id, now),
+            )
+            return int(cur.lastrowid)
+
+    def get_top_manga(self, limit: int) -> list[sqlite3.Row]:
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                SELECT
+                    t.id AS title_id,
+                    t.name AS title_name,
+                    COUNT(v.id) AS view_count
+                FROM manga_views v
+                JOIN titles t ON t.id = v.title_id
+                GROUP BY t.id, t.name
+                ORDER BY view_count DESC, t.name ASC
                 LIMIT ?
                 """,
                 (limit,),

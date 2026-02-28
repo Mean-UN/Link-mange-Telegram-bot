@@ -7,10 +7,11 @@ import time
 from urllib.parse import urlparse
 import urllib.error
 import urllib.request
+from functools import wraps
 from datetime import datetime, timedelta
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.error import BadRequest, NetworkError, TimedOut
+from telegram.error import BadRequest, Conflict, NetworkError, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -47,6 +48,9 @@ DEADLINK_MAX_LIMIT = 1000
 AUDITLOG_DEFAULT_LIMIT = 20
 AUDITLOG_MAX_LIMIT = 200
 PLACEHOLDER_LINK_PATTERNS = ("no.link", "nolink", "no-link", "no_link", "emptylink")
+DAILY_TOP_LIMIT = 10
+TOPMANGA_DEFAULT_LIMIT = 10
+TOPMANGA_MAX_LIMIT = 50
 
 
 def _log_admin_action(actor_id: int | None, action: str, details: str) -> None:
@@ -56,6 +60,26 @@ def _log_admin_action(actor_id: int | None, action: str, details: str) -> None:
         db.add_audit_log(int(actor_id), action, details)
     except Exception:
         logger.exception("Failed to save audit log: %s", action)
+
+
+def _track_command_usage(update: Update, command_name: str) -> None:
+    if command_name != "mangalink":
+        return
+    user = update.effective_user
+    if not user:
+        return
+    try:
+        db.add_usage_log(int(user.id), command_name)
+    except Exception:
+        logger.exception("Failed to save usage log: %s", command_name)
+
+
+def _tracked_command(command_name: str, callback):
+    @wraps(callback)
+    async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        _track_command_usage(update, command_name)
+        await callback(update, context)
+    return wrapped
 
 
 def _is_super_admin(update: Update) -> bool:
@@ -266,7 +290,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• /searchbyadmin <keyword> - search manageable manga\n"
         "• /findduplicatelink - find same links used in episodes\n"
         "• /checktitlelinks <manga title> - check links for one manga\n"
+        "• /topmanga [n] - top manga by open count\n"
         "• /badlinks [n|all] - check non-working links\n"
+        "• /daily [YYYY-MM] - top users by command usage per month\n"
         "• /auditlog [n] - show recent admin activity logs\n"
         "• /addadmin <user_id> - add admin (main admins only)\n"
         "• /removeadmin <user_id> - remove admin (main admins only)\n"
@@ -1174,10 +1200,95 @@ async def audit_log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await _send_long_text(update, context, "\n".join(lines))
 
 
+async def daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _reset_pending(context)
+    _set_admin_auto_delete(context, True)
+    _schedule_delete(update.message, context)
+
+    if not _is_admin(update):
+        await _reply_text(update, context, "You are not an admin.")
+        return
+
+    kh_now = datetime.utcnow() + timedelta(hours=CAMBODIA_UTC_OFFSET_HOURS)
+    month = kh_now.strftime("%Y-%m")
+    if context.args:
+        if len(context.args) > 1:
+            await _reply_text(update, context, "Usage: /daily [YYYY-MM]")
+            return
+        candidate = context.args[0].strip()
+        if not re.match(r"^\d{4}-\d{2}$", candidate):
+            await _reply_text(update, context, "Month format must be YYYY-MM.")
+            return
+        month = candidate
+
+    rows = db.get_top_users_for_month(month, "mangalink", DAILY_TOP_LIMIT)
+    if not rows:
+        await _reply_text(update, context, f"No /mangalink usage data for {month}.")
+        return
+
+    lines = ["📊 Monthly Top Users", "━━━━━━━━━━━━━━━━━━", f"Month: {month}", ""]
+    for idx, row in enumerate(rows, start=1):
+        user_id = int(row["user_id"])
+        usage_count = int(row["usage_count"])
+        display_name = f"User {user_id}"
+        try:
+            chat = await context.bot.get_chat(user_id)
+            full_name = (chat.full_name or "").strip()
+            username = (chat.username or "").strip()
+            if full_name and username:
+                display_name = f"{full_name} (@{username})"
+            elif full_name:
+                display_name = full_name
+            elif username:
+                display_name = f"@{username}"
+        except Exception:
+            pass
+        lines.append(f"{idx}. {display_name} - {usage_count} command(s)")
+    await _send_long_text(update, context, "\n".join(lines))
+
+
+async def top_manga_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _reset_pending(context)
+    _set_admin_auto_delete(context, True)
+    _schedule_delete(update.message, context)
+
+    if not _is_admin(update):
+        await _reply_text(update, context, "You are not an admin.")
+        return
+
+    limit = TOPMANGA_DEFAULT_LIMIT
+    if context.args:
+        if len(context.args) > 1:
+            await _reply_text(update, context, "Usage: /topmanga [n]")
+            return
+        try:
+            limit = int(context.args[0])
+        except ValueError:
+            await _reply_text(update, context, "n must be a number.")
+            return
+        if limit <= 0:
+            await _reply_text(update, context, "n must be greater than 0.")
+            return
+    limit = min(limit, TOPMANGA_MAX_LIMIT)
+
+    rows = db.get_top_manga(limit)
+    if not rows:
+        await _reply_text(update, context, "No manga view data yet.")
+        return
+
+    lines = ["📈 Top Manga", "━━━━━━━━━━━━━━━━━━", f"Showing top {len(rows)} manga by opens", ""]
+    for idx, row in enumerate(rows, start=1):
+        lines.append(f"{idx}. {row['title_name']} - {row['view_count']} open(s)")
+    await _send_long_text(update, context, "\n".join(lines))
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     exc = context.error
     if isinstance(exc, (TimedOut, NetworkError)):
         logger.warning("Telegram network timeout: %s", exc)
+        return
+    if isinstance(exc, Conflict):
+        logger.warning("Telegram conflict: another bot instance is running with the same token.")
         return
     if isinstance(exc, BadRequest) and "Query is too old" in str(exc):
         logger.info("Ignored expired callback query.")
@@ -1204,8 +1315,19 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     elif data.startswith("user:"):
         _set_admin_auto_delete(context, False)
 
+    # Any button click should clear typed-input pending state to avoid stale actions
+    # after navigation (especially when pressing Back).
+    _reset_pending(context)
+    context.user_data.pop("bulk_buffer", None)
+
     if data.startswith("user:title:"):
         title_id = int(data.split(":", 2)[2])
+        user = update.effective_user
+        if user:
+            try:
+                db.add_manga_view(title_id, int(user.id))
+            except Exception:
+                logger.exception("Failed to save manga view: title_id=%s user_id=%s", title_id, user.id)
         title = db.get_title(title_id)
         if not title:
             await _edit_text(query, context, "Manga not found.")
@@ -2036,30 +2158,32 @@ def main() -> None:
         .build()
     )
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("cancel", cancel))
-    app.add_handler(CommandHandler("mangalink", mangalink_command))
-    app.add_handler(CommandHandler("listmanga", list_manga_command))
-    app.add_handler(CommandHandler("search", search_command))
-    app.add_handler(CommandHandler("mangaupdated", manga_updated_command))
-    app.add_handler(CommandHandler("lastupdate", last_update_command))
-    app.add_handler(CommandHandler("searchbyadmin", search_by_admin_command))
-    app.add_handler(CommandHandler("findduplicatelink", find_duplicate_link_command))
-    app.add_handler(CommandHandler("checktitlelinks", check_title_links_command))
-    app.add_handler(CommandHandler("deadlinks", dead_links_command))
-    app.add_handler(CommandHandler("badlinks", dead_links_command))
-    app.add_handler(CommandHandler("auditlog", audit_log_command))
-    app.add_handler(CommandHandler("mangaadmin", admin_command))
-    app.add_handler(CommandHandler("addadmin", add_admin_command))
-    app.add_handler(CommandHandler("removeadmin", remove_admin_command))
-    app.add_handler(CommandHandler("addmangaadmin", add_manga_admin_command))
-    app.add_handler(CommandHandler("removemangaadmin", remove_manga_admin_command))
-    app.add_handler(CommandHandler("getuserid", get_user_id_command))
-    app.add_handler(CommandHandler("listadmin", list_admin_command))
-    app.add_handler(CommandHandler("listep", list_ep_command))
-    app.add_handler(CommandHandler("donateadmin", donate_admin_command))
-    app.add_handler(CommandHandler("done", done_command))
+    app.add_handler(CommandHandler("start", _tracked_command("start", start)))
+    app.add_handler(CommandHandler("help", _tracked_command("help", help_command)))
+    app.add_handler(CommandHandler("cancel", _tracked_command("cancel", cancel)))
+    app.add_handler(CommandHandler("mangalink", _tracked_command("mangalink", mangalink_command)))
+    app.add_handler(CommandHandler("listmanga", _tracked_command("listmanga", list_manga_command)))
+    app.add_handler(CommandHandler("search", _tracked_command("search", search_command)))
+    app.add_handler(CommandHandler("mangaupdated", _tracked_command("mangaupdated", manga_updated_command)))
+    app.add_handler(CommandHandler("lastupdate", _tracked_command("lastupdate", last_update_command)))
+    app.add_handler(CommandHandler("searchbyadmin", _tracked_command("searchbyadmin", search_by_admin_command)))
+    app.add_handler(CommandHandler("findduplicatelink", _tracked_command("findduplicatelink", find_duplicate_link_command)))
+    app.add_handler(CommandHandler("checktitlelinks", _tracked_command("checktitlelinks", check_title_links_command)))
+    app.add_handler(CommandHandler("deadlinks", _tracked_command("deadlinks", dead_links_command)))
+    app.add_handler(CommandHandler("badlinks", _tracked_command("badlinks", dead_links_command)))
+    app.add_handler(CommandHandler("topmanga", _tracked_command("topmanga", top_manga_command)))
+    app.add_handler(CommandHandler("daily", _tracked_command("daily", daily_command)))
+    app.add_handler(CommandHandler("auditlog", _tracked_command("auditlog", audit_log_command)))
+    app.add_handler(CommandHandler("mangaadmin", _tracked_command("mangaadmin", admin_command)))
+    app.add_handler(CommandHandler("addadmin", _tracked_command("addadmin", add_admin_command)))
+    app.add_handler(CommandHandler("removeadmin", _tracked_command("removeadmin", remove_admin_command)))
+    app.add_handler(CommandHandler("addmangaadmin", _tracked_command("addmangaadmin", add_manga_admin_command)))
+    app.add_handler(CommandHandler("removemangaadmin", _tracked_command("removemangaadmin", remove_manga_admin_command)))
+    app.add_handler(CommandHandler("getuserid", _tracked_command("getuserid", get_user_id_command)))
+    app.add_handler(CommandHandler("listadmin", _tracked_command("listadmin", list_admin_command)))
+    app.add_handler(CommandHandler("listep", _tracked_command("listep", list_ep_command)))
+    app.add_handler(CommandHandler("donateadmin", _tracked_command("donateadmin", donate_admin_command)))
+    app.add_handler(CommandHandler("done", _tracked_command("done", done_command)))
     app.add_handler(CallbackQueryHandler(handle_callbacks))
     app.add_handler(
         MessageHandler(
