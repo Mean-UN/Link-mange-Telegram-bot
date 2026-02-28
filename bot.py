@@ -1,9 +1,13 @@
 import asyncio
 import io
 import logging
+import os
 import re
+import shutil
+import sqlite3
 import socket
 import time
+from pathlib import Path
 from urllib.parse import urlparse
 import urllib.error
 import urllib.request
@@ -293,6 +297,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• /topmanga [n] - top manga by open count\n"
         "• /badlinks [n|all] - check non-working links\n"
         "• /daily [YYYY-MM] - top users by command usage per month\n"
+        "• /backupdb [keep] - export DB backup and optionally keep latest N files\n"
         "• /auditlog [n] - show recent admin activity logs\n"
         "• /addadmin <user_id> - add admin (main admins only)\n"
         "• /removeadmin <user_id> - remove admin (main admins only)\n"
@@ -1282,6 +1287,85 @@ async def top_manga_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await _send_long_text(update, context, "\n".join(lines))
 
 
+async def backup_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _reset_pending(context)
+    _set_admin_auto_delete(context, True)
+    _schedule_delete(update.message, context)
+
+    if not _is_admin(update):
+        await _reply_text(update, context, "You are not an admin.")
+        return
+    if not update.message:
+        return
+
+    keep: int | None = None
+    if context.args:
+        if len(context.args) > 1:
+            await _reply_text(update, context, "Usage: /backupdb [keep]")
+            return
+        try:
+            keep = int(context.args[0])
+        except ValueError:
+            await _reply_text(update, context, "keep must be a number.")
+            return
+        if keep <= 0:
+            await _reply_text(update, context, "keep must be greater than 0.")
+            return
+
+    source = Path(DB_PATH)
+    if not source.is_absolute():
+        source = Path.cwd() / source
+    if not source.exists():
+        await _reply_text(update, context, f"Database file not found: {source}")
+        return
+
+    backup_dir = Path.cwd() / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    backup_file = backup_dir / f"linkbot_backup_{stamp}.db"
+
+    try:
+        with sqlite3.connect(str(source)) as src_conn:
+            with sqlite3.connect(str(backup_file)) as dst_conn:
+                src_conn.backup(dst_conn)
+    except Exception:
+        shutil.copy2(source, backup_file)
+
+    deleted = 0
+    if keep is not None:
+        files = sorted(
+            backup_dir.glob("linkbot_backup_*.db"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for old in files[keep:]:
+            try:
+                old.unlink()
+                deleted += 1
+            except OSError:
+                continue
+
+    with open(backup_file, "rb") as f:
+        msg = await update.message.reply_document(
+            document=f,
+            filename=backup_file.name,
+            caption=f"DB backup created: {backup_file.name}",
+        )
+    _schedule_delete(msg, context)
+
+    detail = f"file={backup_file.name}"
+    if keep is not None:
+        detail += f", keep={keep}, deleted_old={deleted}"
+    _log_admin_action(
+        update.effective_user.id if update.effective_user else None,
+        "backup_db",
+        detail,
+    )
+
+    if keep is not None:
+        await _reply_text(update, context, f"Backup complete. Kept latest {keep}, deleted {deleted} old file(s).")
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     exc = context.error
     if isinstance(exc, (TimedOut, NetworkError)):
@@ -2173,6 +2257,7 @@ def main() -> None:
     app.add_handler(CommandHandler("badlinks", _tracked_command("badlinks", dead_links_command)))
     app.add_handler(CommandHandler("topmanga", _tracked_command("topmanga", top_manga_command)))
     app.add_handler(CommandHandler("daily", _tracked_command("daily", daily_command)))
+    app.add_handler(CommandHandler("backupdb", _tracked_command("backupdb", backup_db_command)))
     app.add_handler(CommandHandler("auditlog", _tracked_command("auditlog", audit_log_command)))
     app.add_handler(CommandHandler("mangaadmin", _tracked_command("mangaadmin", admin_command)))
     app.add_handler(CommandHandler("addadmin", _tracked_command("addadmin", add_admin_command)))
