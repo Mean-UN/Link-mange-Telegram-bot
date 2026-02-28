@@ -64,6 +64,17 @@ class Database:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS audit_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    actor_id INTEGER NOT NULL,
+                    action TEXT NOT NULL,
+                    details TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
             # Lightweight migration for older DBs missing created_by columns
             self._ensure_column(conn, "titles", "created_by", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "episodes", "created_by", "INTEGER NOT NULL DEFAULT 0")
@@ -228,6 +239,25 @@ class Database:
             )
             return cur.fetchone()
 
+    def get_recent_episode_links(self, limit: int) -> list[sqlite3.Row]:
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                SELECT
+                    e.id AS episode_id,
+                    e.name AS episode_name,
+                    e.url AS url,
+                    e.created_at AS created_at,
+                    t.name AS title_name
+                FROM episodes e
+                JOIN titles t ON t.id = e.title_id
+                ORDER BY e.id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            return list(cur.fetchall())
+
     def get_prev_episode_id(self, title_id: int, episode_id: int) -> int | None:
         with self._conn() as conn:
             cur = conn.execute(
@@ -320,3 +350,25 @@ class Database:
                 (title_id, user_id),
             )
             return cur.fetchone() is not None
+
+    def add_audit_log(self, actor_id: int, action: str, details: str) -> int:
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        with self._conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO audit_logs (actor_id, action, details, created_at) VALUES (?, ?, ?, ?)",
+                (actor_id, action, details, now),
+            )
+            return int(cur.lastrowid)
+
+    def get_audit_logs(self, limit: int) -> list[sqlite3.Row]:
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                SELECT id, actor_id, action, details, created_at
+                FROM audit_logs
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            return list(cur.fetchall())

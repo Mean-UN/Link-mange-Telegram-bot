@@ -1,7 +1,12 @@
+import asyncio
 import io
 import logging
 import re
+import socket
 import time
+from urllib.parse import urlparse
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -37,6 +42,20 @@ LABEL_ALL_EPS = "\u1797\u17B6\u1782\u1791\u17B6\u17C6\u1784\u17A2\u179F\u17CB"
 DONATE_IMAGE_PATH = "donate_qr.png"
 CAMBODIA_UTC_OFFSET_HOURS = 7
 STARTUP_RETRY_SECONDS = 10
+DEADLINK_DEFAULT_LIMIT = 50
+DEADLINK_MAX_LIMIT = 1000
+AUDITLOG_DEFAULT_LIMIT = 20
+AUDITLOG_MAX_LIMIT = 200
+PLACEHOLDER_LINK_PATTERNS = ("no.link", "nolink", "no-link", "no_link", "emptylink")
+
+
+def _log_admin_action(actor_id: int | None, action: str, details: str) -> None:
+    if actor_id is None:
+        return
+    try:
+        db.add_audit_log(int(actor_id), action, details)
+    except Exception:
+        logger.exception("Failed to save audit log: %s", action)
 
 
 def _is_super_admin(update: Update) -> bool:
@@ -246,6 +265,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• /mangaadmin - admin panel\n"
         "• /searchbyadmin <keyword> - search manageable manga\n"
         "• /findduplicatelink - find same links used in episodes\n"
+        "• /checktitlelinks <manga title> - check links for one manga\n"
+        "• /badlinks [n|all] - check non-working links\n"
+        "• /auditlog [n] - show recent admin activity logs\n"
         "• /addadmin <user_id> - add admin (main admins only)\n"
         "• /removeadmin <user_id> - remove admin (main admins only)\n"
         "• /addmangaadmin <title> | <user_id/@username>\n"
@@ -583,6 +605,7 @@ async def add_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
     added = db.add_admin(user_id)
     if added:
+        _log_admin_action(update.effective_user.id if update.effective_user else None, "add_admin", f"user_id={user_id}")
         await _reply_text(update, context, f"Admin added: {user_id}")
     else:
         await _reply_text(update, context, "Admin already exists.")
@@ -608,6 +631,7 @@ async def remove_admin_command(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     removed = db.remove_admin(user_id)
     if removed:
+        _log_admin_action(update.effective_user.id if update.effective_user else None, "remove_admin", f"user_id={user_id}")
         await _reply_text(update, context, f"Admin removed: {user_id}")
     else:
         await _reply_text(update, context, "Admin not found.")
@@ -681,6 +705,11 @@ async def add_manga_admin_command(update: Update, context: ContextTypes.DEFAULT_
         return
     added = db.add_manga_admin(int(title["id"]), user_id)
     if added:
+        _log_admin_action(
+            update.effective_user.id if update.effective_user else None,
+            "add_manga_admin",
+            f"title_id={title['id']}, user_id={user_id}",
+        )
         await _reply_text(update, context, f"Added manga admin {user_id} for '{title['name']}'.")
     else:
         await _reply_text(update, context, f"User {user_id} already manages '{title['name']}'.")
@@ -713,6 +742,11 @@ async def remove_manga_admin_command(update: Update, context: ContextTypes.DEFAU
         return
     removed = db.remove_manga_admin(int(title["id"]), user_id)
     if removed:
+        _log_admin_action(
+            update.effective_user.id if update.effective_user else None,
+            "remove_manga_admin",
+            f"title_id={title['id']}, user_id={user_id}",
+        )
         await _reply_text(update, context, f"Removed manga admin {user_id} from '{title['name']}'.")
     else:
         await _reply_text(update, context, f"User {user_id} was not assigned to '{title['name']}'.")
@@ -789,6 +823,12 @@ async def _process_bulk_add(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         f"Bulk add complete. Added {added}, skipped {skipped}.",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
+    if added > 0:
+        _log_admin_action(
+            update.effective_user.id if update.effective_user else None,
+            "bulk_add_episodes",
+            f"title_id={title_id}, added={added}, skipped={skipped}",
+        )
 
 async def get_user_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _reset_pending(context)
@@ -917,6 +957,221 @@ async def find_duplicate_link_command(update: Update, context: ContextTypes.DEFA
         lines.append("")
 
     await _send_long_text(update, context, "\n".join(lines).strip())
+
+
+def _probe_url_once(url: str, method: str, timeout: int = 12) -> tuple[bool, str]:
+    req = urllib.request.Request(url=url, method=method, headers={"User-Agent": "LinkBot/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            code = int(getattr(resp, "status", 200))
+            if code >= 400:
+                return False, f"HTTP {code}"
+            return True, f"HTTP {code}"
+    except urllib.error.HTTPError as exc:
+        return False, f"HTTP {exc.code}"
+    except (TimeoutError, socket.timeout):
+        return False, "TimeoutError"
+    except Exception as exc:
+        return False, exc.__class__.__name__
+
+
+def _probe_url(url: str) -> tuple[bool, str]:
+    # Retry strategy: HEAD first (fast), then GET fallback for timeout/restricted hosts.
+    for _ in range(2):
+        ok, detail = _probe_url_once(url, "HEAD")
+        if ok:
+            return ok, detail
+        if detail in {"HTTP 405", "HTTP 403", "TimeoutError"}:
+            ok_get, detail_get = _probe_url_once(url, "GET")
+            if ok_get:
+                return ok_get, detail_get
+            detail = detail_get
+        if detail != "TimeoutError":
+            return False, detail
+    return False, "TimeoutError"
+
+
+def _is_placeholder_link(url: str) -> bool:
+    try:
+        parsed = urlparse(url.strip())
+    except Exception:
+        return False
+    target = f"{parsed.netloc}{parsed.path}".lower()
+    return any(pattern in target for pattern in PLACEHOLDER_LINK_PATTERNS)
+
+
+async def dead_links_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _reset_pending(context)
+    _set_admin_auto_delete(context, True)
+    _schedule_delete(update.message, context)
+
+    if not _is_admin(update):
+        await _reply_text(update, context, "You are not an admin.")
+        return
+
+    limit = DEADLINK_DEFAULT_LIMIT
+    scope_text = "recent"
+    if context.args:
+        if len(context.args) > 1:
+            await _reply_text(update, context, "Usage: /badlinks [n|all]")
+            return
+        arg = (context.args[0] or "").strip().lower()
+        if arg == "all":
+            limit = min(db.count_episodes(), DEADLINK_MAX_LIMIT)
+            scope_text = "all"
+        else:
+            try:
+                limit = int(arg)
+            except ValueError:
+                await _reply_text(update, context, "n must be a number or 'all'.")
+                return
+            if limit <= 0:
+                await _reply_text(update, context, "n must be greater than 0.")
+                return
+    limit = min(limit, DEADLINK_MAX_LIMIT)
+
+    rows = db.get_recent_episode_links(limit)
+    if not rows:
+        await _reply_text(update, context, "No episodes found.")
+        return
+
+    semaphore = asyncio.Semaphore(10)
+
+    async def check_row(row) -> tuple[object, bool, str]:
+        async with semaphore:
+            raw_url = str(row["url"])
+            if _is_placeholder_link(raw_url):
+                return row, False, "Placeholder link"
+            ok, detail = await asyncio.to_thread(_probe_url, raw_url)
+            return row, ok, detail
+
+    results = await asyncio.gather(*(check_row(row) for row in rows))
+    bad = [(row, detail) for row, ok, detail in results if not ok]
+
+    header = [
+        "🔗 Dead Link Check",
+        "━━━━━━━━━━━━━━━━━━",
+        f"Checked: {len(rows)} {scope_text} link(s)",
+        f"Broken/timeout: {len(bad)}",
+        "",
+    ]
+    if not bad:
+        await _reply_text(update, context, "\n".join(header).strip() + "\nNo dead links found.")
+        return
+
+    lines = header
+    for idx, (row, detail) in enumerate(bad, start=1):
+        ep_name = _display_ep_name(str(row["episode_name"]))
+        lines.append(f"{idx}. {row['title_name']} | {ep_name}")
+        lines.append(f"   Reason: {detail}")
+        lines.append(f"   URL: {row['url']}")
+    await _send_long_text(update, context, "\n".join(lines))
+
+
+async def check_title_links_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _reset_pending(context)
+    _set_admin_auto_delete(context, True)
+    _schedule_delete(update.message, context)
+
+    if not _is_admin(update):
+        await _reply_text(update, context, "You are not an admin.")
+        return
+
+    raw = " ".join(context.args).strip()
+    if not raw:
+        await _reply_text(update, context, "Usage: /checktitlelinks <manga title>")
+        return
+
+    matches = db.search_titles_by_keyword(raw)
+    if not matches:
+        await _reply_text(update, context, f"Manga not found: {raw}")
+        return
+    picked = next((t for t in matches if str(t["name"]).casefold() == raw.casefold()), None)
+    if not picked and len(matches) == 1:
+        picked = matches[0]
+    if not picked:
+        names = "\n".join(f"- {t['name']}" for t in matches[:10])
+        suffix = "\n..." if len(matches) > 10 else ""
+        await _reply_text(update, context, f"Multiple manga matched '{raw}'. Use full title:\n{names}{suffix}")
+        return
+
+    if not _can_manage_title(update.effective_user.id, int(picked["id"]), picked["created_by"]):
+        await _reply_text(update, context, "You cannot check links for this manga.")
+        return
+
+    episodes = db.get_episodes(int(picked["id"]))
+    if not episodes:
+        await _reply_text(update, context, f"{picked['name']} - No episodes yet.")
+        return
+
+    semaphore = asyncio.Semaphore(10)
+
+    async def check_ep(ep) -> tuple[object, bool, str]:
+        async with semaphore:
+            raw_url = str(ep["url"])
+            if _is_placeholder_link(raw_url):
+                return ep, False, "Placeholder link"
+            ok, detail = await asyncio.to_thread(_probe_url, raw_url)
+            return ep, ok, detail
+
+    results = await asyncio.gather(*(check_ep(ep) for ep in episodes))
+    bad = [(ep, detail) for ep, ok, detail in results if not ok]
+
+    header = [
+        "🔗 Title Link Check",
+        "━━━━━━━━━━━━━━━━━━",
+        f"Title: {picked['name']}",
+        f"Checked: {len(episodes)} link(s)",
+        f"Broken/timeout: {len(bad)}",
+        "",
+    ]
+    if not bad:
+        await _reply_text(update, context, "\n".join(header).strip() + "\nNo dead links found.")
+        return
+
+    lines = header
+    for idx, (ep, detail) in enumerate(bad, start=1):
+        ep_name = _display_ep_name(str(ep["name"]))
+        lines.append(f"{idx}. {ep_name}")
+        lines.append(f"   Reason: {detail}")
+        lines.append(f"   URL: {ep['url']}")
+    await _send_long_text(update, context, "\n".join(lines))
+
+
+async def audit_log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _reset_pending(context)
+    _set_admin_auto_delete(context, True)
+    _schedule_delete(update.message, context)
+
+    if not _is_admin(update):
+        await _reply_text(update, context, "You are not an admin.")
+        return
+
+    limit = AUDITLOG_DEFAULT_LIMIT
+    if context.args:
+        if len(context.args) > 1:
+            await _reply_text(update, context, "Usage: /auditlog [n]")
+            return
+        try:
+            limit = int(context.args[0])
+        except ValueError:
+            await _reply_text(update, context, "n must be a number.")
+            return
+        if limit <= 0:
+            await _reply_text(update, context, "n must be greater than 0.")
+            return
+    limit = min(limit, AUDITLOG_MAX_LIMIT)
+
+    logs = db.get_audit_logs(limit)
+    if not logs:
+        await _reply_text(update, context, "No audit logs yet.")
+        return
+
+    lines = ["🧾 Audit Log", "━━━━━━━━━━━━━━━━━━", f"Showing latest {len(logs)} item(s)", ""]
+    for item in logs:
+        lines.append(f"[{item['created_at']}] {item['action']} by {item['actor_id']}")
+        lines.append(f"  {item['details']}")
+    await _send_long_text(update, context, "\n".join(lines))
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1490,6 +1745,11 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 return
             deleted = db.delete_title(title_id)
             if deleted:
+                _log_admin_action(
+                    update.effective_user.id if update.effective_user else None,
+                    "delete_title",
+                    f"title_id={title_id}, name={title['name']}",
+                )
                 await _edit_text(
                     query,
                     context,
@@ -1535,6 +1795,11 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             title_id = ep["title_id"]
             deleted = db.delete_episode(episode_id)
             if deleted:
+                _log_admin_action(
+                    update.effective_user.id if update.effective_user else None,
+                    "delete_episode",
+                    f"episode_id={episode_id}, title_id={title_id}",
+                )
                 await _edit_text(query, context, 
                     "Episode deleted.",
                     reply_markup=InlineKeyboardMarkup(
@@ -1609,6 +1874,11 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if title_id is None:
             await _reply_text(update, context, "Manga already exists.")
         else:
+            _log_admin_action(
+                update.effective_user.id if update.effective_user else None,
+                "add_title",
+                f"title_id={title_id}, name={text}",
+            )
             keyboard = [
                 [InlineKeyboardButton("Add episode", callback_data=f"admin:addep:{title_id}")],
                 [InlineKeyboardButton("Bulk add episodes", callback_data=f"admin:bulk_add:{title_id}")],
@@ -1642,6 +1912,11 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await _reply_text(update, context, "Missing state. Start again from /admin.")
             return
         db.add_episode(int(title_id), ep_name, url, update.effective_user.id)
+        _log_admin_action(
+            update.effective_user.id if update.effective_user else None,
+            "add_episode",
+            f"title_id={title_id}, episode_name={ep_name}",
+        )
         context.user_data.pop("pending_ep_name", None)
         context.user_data["pending_action"] = "add_ep_name"
         await _reply_text(update, context, "Episode added. Send next episode name or /cancel.")
@@ -1656,6 +1931,11 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         updated = db.update_title(int(title_id), text)
         _reset_pending(context)
         if updated:
+            _log_admin_action(
+                update.effective_user.id if update.effective_user else None,
+                "edit_title",
+                f"title_id={title_id}, new_name={text}",
+            )
             await _reply_text(
                 update,
                 context,
@@ -1682,6 +1962,11 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         updated = db.update_episode(int(episode_id), _normalize_ep_name(text), ep["url"])
         _reset_pending(context)
         if updated:
+            _log_admin_action(
+                update.effective_user.id if update.effective_user else None,
+                "edit_episode_name",
+                f"episode_id={episode_id}, new_name={_normalize_ep_name(text)}",
+            )
             await _reply_text(
                 update,
                 context,
@@ -1712,6 +1997,11 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         updated = db.update_episode(int(episode_id), ep["name"], url)
         _reset_pending(context)
         if updated:
+            _log_admin_action(
+                update.effective_user.id if update.effective_user else None,
+                "edit_episode_url",
+                f"episode_id={episode_id}",
+            )
             await _reply_text(
                 update,
                 context,
@@ -1756,6 +2046,10 @@ def main() -> None:
     app.add_handler(CommandHandler("lastupdate", last_update_command))
     app.add_handler(CommandHandler("searchbyadmin", search_by_admin_command))
     app.add_handler(CommandHandler("findduplicatelink", find_duplicate_link_command))
+    app.add_handler(CommandHandler("checktitlelinks", check_title_links_command))
+    app.add_handler(CommandHandler("deadlinks", dead_links_command))
+    app.add_handler(CommandHandler("badlinks", dead_links_command))
+    app.add_handler(CommandHandler("auditlog", audit_log_command))
     app.add_handler(CommandHandler("mangaadmin", admin_command))
     app.add_handler(CommandHandler("addadmin", add_admin_command))
     app.add_handler(CommandHandler("removeadmin", remove_admin_command))
