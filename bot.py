@@ -42,19 +42,29 @@ EP_PAGE_SIZE = 30
 TITLE_PAGE_SIZE = 20
 ADMIN_AUTO_DELETE_KEY = "admin_auto_delete"
 EP_PREFIX = "\u1797\u17B6\u1782"
-LABEL_TITLES = "\u1794\u1789\u17D2\u1785\u17B8\u179A\u17BF\u1784\u17D6"
+LABEL_TITLES = "\u1794\u1789\u17D2\u1785\u17B8\u179A\u17BF\u1784\u17D6\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501"
 LABEL_ALL_EPS = "\u1797\u17B6\u1782\u1791\u17B6\u17C6\u1784\u17A2\u179F\u17CB"
 DONATE_IMAGE_PATH = "donate_qr.png"
 CAMBODIA_UTC_OFFSET_HOURS = 7
 STARTUP_RETRY_SECONDS = 10
 DEADLINK_DEFAULT_LIMIT = 50
 DEADLINK_MAX_LIMIT = 1000
+DEADLINK_TIMEOUT = 6
+DEADLINK_CONCURRENCY = 20
+DEADLINK_SKIP_HTTP = {"HTTP 401", "HTTP 403", "HTTP 429", "HTTP 999"}
 AUDITLOG_DEFAULT_LIMIT = 20
 AUDITLOG_MAX_LIMIT = 200
 PLACEHOLDER_LINK_PATTERNS = ("no.link", "nolink", "no-link", "no_link", "emptylink")
 DAILY_TOP_LIMIT = 10
 TOPMANGA_DEFAULT_LIMIT = 10
 TOPMANGA_MAX_LIMIT = 50
+SUPPORT_GROUP = os.getenv("SUPPORT_GROUP", "@YourGroup").strip()
+DEVELOPER_NAME = os.getenv("DEVELOPER_NAME", "Mean Un").strip()
+DEVELOPER_TAG = os.getenv("DEVELOPER_TAG", "@Mean_Un").strip()
+BTN_PREV = "ភាគមុន"
+BTN_NEXT = "ភាគបន្ទាប់"
+BTN_TITLES_PREV = "ត្រឡប់វិញ"
+BTN_TITLES_NEXT = "រឿងបន្ទាប់"
 
 
 def _log_admin_action(actor_id: int | None, action: str, details: str) -> None:
@@ -177,6 +187,31 @@ async def _reply_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
     return msg
 
 
+def _format_report(title: str, lines: list[str]) -> str:
+    return "\n".join([title, "━━━━━━━━━━━━━━━━━━", *lines]).strip()
+
+
+def _developer_display() -> str:
+    if DEVELOPER_NAME and DEVELOPER_TAG:
+        return f"{DEVELOPER_NAME} ({DEVELOPER_TAG})"
+    return DEVELOPER_TAG or DEVELOPER_NAME or "Unknown"
+
+
+def _group_display() -> str:
+    return SUPPORT_GROUP or "Unknown"
+
+
+def _help_menu_text() -> str:
+    lines = [
+        "🗿There Are So Much Features In This Bot!",
+        "🫀Use The Buttons Below To Check Classified Features!",
+        "",
+        "━━━━━━━━━━━━━━━━━━",
+        f"Develop by {_developer_display()}",
+    ]
+    return _format_report("🤖 Link Manga Bot", lines)
+
+
 def _paginate(items: list, page: int, per_page: int) -> tuple[list, int, int]:
     if page < 0:
         page = 0
@@ -245,6 +280,19 @@ async def _reply_to_query(query, context: ContextTypes.DEFAULT_TYPE, text: str, 
     return msg
 
 
+async def _send_donate_qr(message, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not message:
+        return
+    path = Path(DONATE_IMAGE_PATH)
+    if not path.exists():
+        msg = await message.reply_text("Donation QR not found.")
+        _schedule_delete(msg, context)
+        return
+    with path.open("rb") as photo:
+        msg = await message.reply_photo(photo=photo, caption="💖 Donation QR")
+    _schedule_delete(msg, context)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _reset_pending(context)
     _set_admin_auto_delete(context, False)
@@ -274,45 +322,18 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     _reset_pending(context)
     _set_admin_auto_delete(context, False)
     _schedule_delete(update.message, context)
+    keyboard = [
+        [
+            InlineKeyboardButton("👤 User", callback_data="help:user"),
+            InlineKeyboardButton("🛠️ Admin", callback_data="help:admin"),
+            InlineKeyboardButton("🧰 Tools", callback_data="help:tools"),
+        ],
+    ]
     await _reply_text(
         update,
         context,
-        "📖 𝗛𝗲𝗹𝗽 𝗠𝗲𝗻𝘂\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "👤 User Commands\n"
-        "• /start - welcome message\n"
-        "• /mangalink - browse manga\n"
-        "• /listmanga - list all manga\n"
-        "• /search <keyword> - search manga title\n"
-        "• /mangaupdated [n] - manga/link updates by day range\n"
-        "• /lastupdate <manga title> - show latest update of one manga\n"
-        "• /listep 1-10 - generate episode labels\n"
-        "• /getuserid - get user ID\n"
-        "\n"
-        "🛠️ Admin Commands\n"
-        "• /mangaadmin - admin panel\n"
-        "• /searchbyadmin <keyword> - search manageable manga\n"
-        "• /findduplicatelink - find same links used in episodes\n"
-        "• /checktitlelinks <manga title> - check links for one manga\n"
-        "• /topmanga [n] - top manga by open count\n"
-        "• /badlinks [n|all] - check non-working links\n"
-        "• /daily [YYYY-MM] - top users by command usage per month\n"
-        "• /backupdb [keep] - export DB backup and optionally keep latest N files\n"
-        "• /auditlog [n] - show recent admin activity logs\n"
-        "• /addadmin <user_id> - add admin (main admins only)\n"
-        "• /removeadmin <user_id> - remove admin (main admins only)\n"
-        "• /addmangaadmin <title> | <user_id/@username>\n"
-        "• /removemangaadmin <title> | <user_id/@username>\n"
-        "• /listadmin - list admins (main admins only)\n"
-        "• /cancel - cancel current admin input\n"
-        "• /done - finish bulk add input\n\n"
-        "📌 Admin Rules\n"
-        "• Main admins can manage all data\n"
-        "• Added admins manage only assigned/created manga\n"
-        "• Added admins cannot add/remove other admins\n\n"
-        "💖 Support\n"
-        "• /donateadmin - donation QR\n\n"
-        "👨‍💻 Developed by @Mean_Un"
+        _help_menu_text(),
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
@@ -341,9 +362,9 @@ async def mangalink_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     ]
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton("Prev", callback_data=f"user:titles:{page-1}"))
+        nav.append(InlineKeyboardButton(BTN_TITLES_PREV, callback_data=f"user:titles:{page-1}"))
     if page < pages - 1:
-        nav.append(InlineKeyboardButton("Next", callback_data=f"user:titles:{page+1}"))
+        nav.append(InlineKeyboardButton(BTN_TITLES_NEXT, callback_data=f"user:titles:{page+1}"))
     if nav:
         keyboard.append(nav)
     await _reply_text(update, context, LABEL_TITLES, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -359,10 +380,10 @@ async def list_manga_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await _reply_text(update, context, "No manga yet.")
         return
 
-    lines = ["📚 Manga List", "━━━━━━━━━━━━━━━━━━"]
+    lines: list[str] = []
     for idx, title in enumerate(titles, start=1):
         lines.append(f"{idx}. {title['name']}")
-    await _send_long_text(update, context, "\n".join(lines))
+    await _send_long_text(update, context, _format_report("📚 𝗠𝗮𝗻𝗴𝗮 𝗟𝗶𝘀𝘁", lines))
 
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -383,7 +404,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     q = query.casefold()
     matched = [t for t in titles if q in str(t["name"]).casefold()]
     if not matched:
-        await _reply_text(update, context, f"No manga found for: {query}")
+        await _reply_text(update, context, _format_report("🔎 𝗦𝗲𝗮𝗿𝗰𝗵 𝗥𝗲𝘀𝘂𝗹𝘁", [f"❌ No manga found for: {query}"]))
         return
 
     shown = matched[:TITLE_PAGE_SIZE]
@@ -391,9 +412,15 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         [InlineKeyboardButton(t["name"], callback_data=f"user:title:{t['id']}")]
         for t in shown
     ]
-    text = f"Search results for '{query}' ({len(matched)} found):"
+    text_lines = [
+        "🔎 𝗦𝗲𝗮𝗿𝗰𝗵 𝗥𝗲𝘀𝘂𝗹𝘁",
+        "━━━━━━━━━━━━━━━━━━",
+        f"🔤 Keyword: {query}",
+        f"📚 Found: {len(matched)}",
+    ]
     if len(matched) > TITLE_PAGE_SIZE:
-        text += f"\nShowing first {TITLE_PAGE_SIZE}. Refine your keyword for fewer results."
+        text_lines.append(f"ℹ️ Showing first {TITLE_PAGE_SIZE}. Refine keyword to narrow results.")
+    text = "\n".join(text_lines)
     await _reply_text(update, context, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 
@@ -470,40 +497,44 @@ async def manga_updated_command(update: Update, context: ContextTypes.DEFAULT_TY
     start_iso = start_utc_dt.isoformat(timespec="seconds")
     rows = db.get_manga_update_counts_since(start_iso)
 
+    title = "🕒 𝗠𝗮𝗻𝗴𝗮 𝗨𝗽𝗱𝗮𝘁𝗲"
     if days_back == 0:
-        header = (
-            "📊 𝗠𝗮𝗻𝗴𝗮 𝗨𝗽𝗱𝗮𝘁𝗲 𝗥𝗲𝗽𝗼𝗿𝘁\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            f"🗓️ Date: {today_kh.isoformat()}\n"
-            "📆 Today"
-        )
+        header_lines = [
+            f"🗓️ Date: {today_kh.isoformat()}",
+            "📆 Today",
+        ]
     else:
-        header = (
-            "📊 𝗠𝗮𝗻𝗴𝗮 𝗨𝗽𝗱𝗮𝘁𝗲 𝗥𝗲𝗽𝗼𝗿𝘁\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            f"🗓️ Range: {start_date.isoformat()} to {today_kh.isoformat()}\n"
-            f"📆 {days_back + 1} day(s)"
-        )
+        header_lines = [
+            f"🗓️ Range: {start_date.isoformat()} to {today_kh.isoformat()}",
+            f"📆 {days_back + 1} day(s)",
+        ]
 
     if not rows:
         await _reply_text(
             update,
             context,
-            f"{header}\n📚 Manga updated: 0\n🔗 Links updated: 0\n━━━━━━━━━━━━━━━━━━\nNo updates in this period.",
+            _format_report(
+                title,
+                [
+                    *header_lines,
+                    "📚 Manga updated: 0",
+                    "🔗 Links updated: 0",
+                    "✅ No updates in this period.",
+                ],
+            ),
         )
         return
 
     total_added_episodes = sum(int(row["added_episodes"]) for row in rows)
     lines = [
-        header,
+        *header_lines,
         f"📚 Manga updated: {len(rows)}",
         f"🔗 Links updated: {total_added_episodes}",
-        "━━━━━━━━━━━━━━━━━━",
     ]
     for idx, row in enumerate(rows, start=1):
         lines.append(f"{idx}. {row['title_name']}")
         lines.append(f"   🔗 Added {row['added_episodes']} Links")
-    await _send_long_text(update, context, "\n".join(lines))
+    await _send_long_text(update, context, _format_report(title, lines))
 
 
 async def last_update_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -595,8 +626,13 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         [InlineKeyboardButton("Add manga", callback_data="admin:add_title")],
         [InlineKeyboardButton("Manage manga", callback_data="admin:manage")],
     ]
-    await _reply_text(update, context, 
-        f"Admin panel\nManga: {titles_count} | Episodes: {eps_count}",
+    await _reply_text(
+        update,
+        context,
+        _format_report(
+            "🛠️ 𝗔𝗱𝗺𝗶𝗻 𝗣𝗮𝗻𝗲𝗹",
+            [f"📚 Manga: {titles_count}", f"🎬 Episodes: {eps_count}"],
+        ),
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
@@ -840,6 +876,9 @@ async def _process_bulk_add(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         if not _valid_url(url):
             skipped += 1
             continue
+        if _is_placeholder_link(url):
+            skipped += 1
+            continue
         db.add_episode(int(title_id), name, url, update.effective_user.id)
         added += 1
     _reset_pending(context)
@@ -881,24 +920,46 @@ async def list_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     db_admins = db.get_admin_ids()
     main_admins = sorted(list(ADMIN_IDS))
-    lines = ["Main admins:"]
+    lines = [
+        "📚 Main admins:",
+    ]
     for uid in main_admins:
         try:
             chat = await context.bot.get_chat(uid)
-            name = (chat.full_name or "").strip() or str(uid)
+            full_name = (chat.full_name or "").strip()
+            username = (chat.username or "").strip()
         except Exception:
-            name = str(uid)
-        lines.append(f"{name} - {uid}")
+            full_name = ""
+            username = ""
+        if full_name and username:
+            display = f"{full_name} (@{username})"
+        elif full_name:
+            display = full_name
+        elif username:
+            display = f"@{username}"
+        else:
+            display = "Unknown"
+        lines.append(f"• {display} ({uid})")
     lines.append("")
-    lines.append("Added admins:")
+    lines.append("📚 Assigned admins:")
     for uid in db_admins:
         try:
             chat = await context.bot.get_chat(uid)
-            name = (chat.full_name or "").strip() or str(uid)
+            full_name = (chat.full_name or "").strip()
+            username = (chat.username or "").strip()
         except Exception:
-            name = str(uid)
-        lines.append(f"{name} - {uid}")
-    text = "\n".join(lines).strip()
+            full_name = ""
+            username = ""
+        if full_name and username:
+            display = f"{full_name} (@{username})"
+        elif full_name:
+            display = full_name
+        elif username:
+            display = f"@{username}"
+        else:
+            display = "Unknown"
+        lines.append(f"• {display} ({uid})")
+    text = _format_report("📋 𝗔𝗱𝗺𝗶𝗻 𝗟𝗶𝘀𝘁", lines)
     await _reply_text(update, context, text)
 
 
@@ -946,15 +1007,7 @@ async def donate_admin_command(update: Update, context: ContextTypes.DEFAULT_TYP
     _schedule_delete(update.message, context)
     if not update.message:
         return
-    try:
-        with open(DONATE_IMAGE_PATH, "rb") as f:
-            msg = await update.message.reply_photo(
-                photo=f,
-                caption="Donate via QR code\nDeveloped by @Mean_Un",
-            )
-        _schedule_delete(msg, context)
-    except FileNotFoundError:
-        await _reply_text(update, context, f"Donation QR image not found: {DONATE_IMAGE_PATH}")
+    await _send_donate_qr(update.message, context)
 
 
 async def find_duplicate_link_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -978,7 +1031,7 @@ async def find_duplicate_link_command(update: Update, context: ContextTypes.DEFA
         groups.setdefault(url, []).append(row)
         counts[url] = int(row["duplicate_count"])
 
-    lines = ["🔎 Duplicate Link Report", "━━━━━━━━━━━━━━━━━━", f"Duplicate links found: {len(groups)}", ""]
+    lines = [f"🔗 Duplicate links found: {len(groups)}", ""]
     for idx, (url, usages) in enumerate(groups.items(), start=1):
         lines.append(f"{idx}. 🔗 {url}")
         lines.append(f"   Used: {counts[url]} time(s)")
@@ -987,10 +1040,10 @@ async def find_duplicate_link_command(update: Update, context: ContextTypes.DEFA
             lines.append(f"   - {usage['title_name']} | {ep_name}")
         lines.append("")
 
-    await _send_long_text(update, context, "\n".join(lines).strip())
+    await _send_long_text(update, context, _format_report("🔎 𝗗𝘂𝗽𝗹𝗶𝗰𝗮𝘁𝗲 𝗟𝗶𝗻𝗸 𝗥𝗲𝗽𝗼𝗿𝘁", lines))
 
 
-def _probe_url_once(url: str, method: str, timeout: int = 12) -> tuple[bool, str]:
+def _probe_url_once(url: str, method: str, timeout: int = DEADLINK_TIMEOUT) -> tuple[bool, str]:
     req = urllib.request.Request(url=url, method=method, headers={"User-Agent": "LinkBot/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -1040,11 +1093,11 @@ async def dead_links_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await _reply_text(update, context, "You are not an admin.")
         return
 
-    limit = DEADLINK_DEFAULT_LIMIT
-    scope_text = "recent"
+    limit = min(db.count_episodes(), DEADLINK_MAX_LIMIT)
+    scope_text = "all"
     if context.args:
         if len(context.args) > 1:
-            await _reply_text(update, context, "Usage: /badlinks [n|all]")
+            await _reply_text(update, context, "Usage: /deadlinks [n|all]")
             return
         arg = (context.args[0] or "").strip().lower()
         if arg == "all":
@@ -1066,7 +1119,14 @@ async def dead_links_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await _reply_text(update, context, "No episodes found.")
         return
 
-    semaphore = asyncio.Semaphore(10)
+    header = [
+        f"🔎 Scanning: {len(rows)} {scope_text} link(s)",
+        "⏳ Dead links will be sent as they are found.",
+    ]
+    await _reply_text(update, context, _format_report("🔍 𝗗𝗲𝗮𝗱 𝗟𝗶𝗻𝗸𝘀", header))
+
+    semaphore = asyncio.Semaphore(DEADLINK_CONCURRENCY)
+    counter = 0
 
     async def check_row(row) -> tuple[object, bool, str]:
         async with semaphore:
@@ -1077,26 +1137,30 @@ async def dead_links_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return row, ok, detail
 
     results = await asyncio.gather(*(check_row(row) for row in rows))
-    bad = [(row, detail) for row, ok, detail in results if not ok]
 
-    header = [
-        "🔗 Dead Link Check",
-        "━━━━━━━━━━━━━━━━━━",
-        f"Checked: {len(rows)} {scope_text} link(s)",
-        f"Broken/timeout: {len(bad)}",
-        "",
-    ]
-    if not bad:
-        await _reply_text(update, context, "\n".join(header).strip() + "\nNo dead links found.")
+    grouped: dict[str, list[tuple[str, str, str]]] = {}
+    for row, ok, detail in results:
+        if ok:
+            continue
+        if detail in DEADLINK_SKIP_HTTP:
+            continue
+        counter += 1
+        ep_name = _display_ep_name(str(row["episode_name"]))
+        grouped.setdefault(str(row["title_name"]), []).append((ep_name, str(row["url"]), detail))
+
+    if counter == 0:
+        await _reply_text(update, context, _format_report("✅ 𝗗𝗲𝗮𝗱 𝗟𝗶𝗻𝗸𝘀", ["No dead links found."]))
         return
 
-    lines = header
-    for idx, (row, detail) in enumerate(bad, start=1):
-        ep_name = _display_ep_name(str(row["episode_name"]))
-        lines.append(f"{idx}. {row['title_name']} | {ep_name}")
-        lines.append(f"   Reason: {detail}")
-        lines.append(f"   URL: {row['url']}")
-    await _send_long_text(update, context, "\n".join(lines))
+    for title_name, items in grouped.items():
+        lines = [f"📚 Title: {title_name}", f"❌ Dead links: {len(items)}", ""]
+        for idx, (ep_name, url, detail) in enumerate(items, start=1):
+            lines.append(f"{idx}. {ep_name}")
+            lines.append(f"   Reason: {detail}")
+            lines.append(f"   URL: {url}")
+        await _send_long_text(update, context, _format_report("❌ 𝗗𝗲𝗮𝗱 𝗟𝗶𝗻𝗸𝘀", lines))
+
+    await _reply_text(update, context, _format_report("✅ 𝗗𝗲𝗮𝗱 𝗟𝗶𝗻𝗸𝘀", [f"Finished. Total dead links: {counter}."]))
 
 
 async def check_title_links_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1149,15 +1213,13 @@ async def check_title_links_command(update: Update, context: ContextTypes.DEFAUL
     bad = [(ep, detail) for ep, ok, detail in results if not ok]
 
     header = [
-        "🔗 Title Link Check",
-        "━━━━━━━━━━━━━━━━━━",
-        f"Title: {picked['name']}",
-        f"Checked: {len(episodes)} link(s)",
-        f"Broken/timeout: {len(bad)}",
+        f"📚 Title: {picked['name']}",
+        f"🔗 Checked: {len(episodes)} link(s)",
+        f"❌ Broken/timeout: {len(bad)}",
         "",
     ]
     if not bad:
-        await _reply_text(update, context, "\n".join(header).strip() + "\nNo dead links found.")
+        await _reply_text(update, context, _format_report("🔗 𝗧𝗶𝘁𝗹𝗲 𝗟𝗶𝗻𝗸 𝗖𝗵𝗲𝗰𝗸", header + ["✅ No dead links found."]))
         return
 
     lines = header
@@ -1198,11 +1260,11 @@ async def audit_log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await _reply_text(update, context, "No audit logs yet.")
         return
 
-    lines = ["🧾 Audit Log", "━━━━━━━━━━━━━━━━━━", f"Showing latest {len(logs)} item(s)", ""]
+    lines = [f"📄 Showing latest {len(logs)} item(s)", ""]
     for item in logs:
         lines.append(f"[{item['created_at']}] {item['action']} by {item['actor_id']}")
         lines.append(f"  {item['details']}")
-    await _send_long_text(update, context, "\n".join(lines))
+    await _send_long_text(update, context, _format_report("🧾 𝗔𝘂𝗱𝗶𝘁 𝗟𝗼𝗴", lines))
 
 
 async def daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1231,7 +1293,7 @@ async def daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _reply_text(update, context, f"No /mangalink usage data for {month}.")
         return
 
-    lines = ["📊 Monthly Top Users", "━━━━━━━━━━━━━━━━━━", f"Month: {month}", ""]
+    lines = [f"📅 Month: {month}", "🔍 Command: /mangalink", ""]
     for idx, row in enumerate(rows, start=1):
         user_id = int(row["user_id"])
         usage_count = int(row["usage_count"])
@@ -1248,8 +1310,8 @@ async def daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 display_name = f"@{username}"
         except Exception:
             pass
-        lines.append(f"{idx}. {display_name} - {usage_count} command(s)")
-    await _send_long_text(update, context, "\n".join(lines))
+        lines.append(f"{idx}. {display_name} - {usage_count} use(s)")
+    await _send_long_text(update, context, _format_report("📊 𝗠𝗼𝗻𝘁𝗵𝗹𝘆 𝗧𝗼𝗽 𝗨𝘀𝗲𝗿𝘀", lines))
 
 
 async def top_manga_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1281,10 +1343,10 @@ async def top_manga_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await _reply_text(update, context, "No manga view data yet.")
         return
 
-    lines = ["📈 Top Manga", "━━━━━━━━━━━━━━━━━━", f"Showing top {len(rows)} manga by opens", ""]
+    lines = [f"📚 Showing top {len(rows)} manga by opens", ""]
     for idx, row in enumerate(rows, start=1):
         lines.append(f"{idx}. {row['title_name']} - {row['view_count']} open(s)")
-    await _send_long_text(update, context, "\n".join(lines))
+    await _send_long_text(update, context, _format_report("📈 𝗧𝗼𝗽 𝗠𝗮𝗻𝗴𝗮", lines))
 
 
 async def backup_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1394,6 +1456,68 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         raise
     except (TimedOut, NetworkError):
         return
+    if data.startswith("help:"):
+        section = data.split(":", 1)[1]
+        keyboard = [
+            [
+                InlineKeyboardButton("👤 User", callback_data="help:user"),
+                InlineKeyboardButton("🛠️ Admin", callback_data="help:admin"),
+                InlineKeyboardButton("🧰 Tools", callback_data="help:tools"),
+            ],
+            [InlineKeyboardButton("🔙 Back", callback_data="help:back")],
+        ]
+        if section == "back":
+            await _edit_text(
+                query,
+                context,
+                _help_menu_text(),
+                reply_markup=InlineKeyboardMarkup([keyboard[0], keyboard[1]]),
+            )
+            return
+        if section == "user":
+            lines = [
+                "• /start - welcome message",
+                "• /mangalink - browse manga",
+                "• /listmanga - list all manga",
+                "• /search <keyword> - search manga title",
+                "• /mangaupdated [n] - manga/link updates by day range",
+                "• /lastupdate <manga title> - show latest update of one manga",
+                "• /donateadmin - donation QR",
+            ]
+            title = "👤 𝗨𝘀𝗲𝗿 𝗖𝗼𝗺𝗺𝗮𝗻𝗱𝘀"
+        elif section == "admin":
+            lines = [
+                "• /mangaadmin - admin panel",
+                "• /searchbyadmin <keyword> - search manageable manga",
+                "• /findduplicatelink - find same links used in episodes",
+                "• /checktitlelinks <manga title> - check links for one manga",
+                "• /topmanga [n] - top manga by open count",
+                "• /deadlinks [n|all] - check non-working links",
+                "• /daily [YYYY-MM] - top users by /mangalink per month",
+                "• /backupdb [keep] - export DB backup",
+                "• /auditlog [n] - show recent admin activity logs",
+                "• /addadmin <user_id> - add admin (main admins only)",
+                "• /removeadmin <user_id> - remove admin (main admins only)",
+                "• /addmangaadmin <title> | <user_id/@username>",
+                "• /removemangaadmin <title> | <user_id/@username>",
+                "• /listadmin - list admins (main admins only)",
+                "• /cancel - cancel current admin input",
+                "• /done - finish bulk add input",
+            ]
+            title = "🛠️ 𝗔𝗱𝗺𝗶𝗻 𝗖𝗼𝗺𝗺𝗮𝗻𝗱𝘀"
+        else:
+            lines = [
+                "• /listep 1-10 - generate episode labels",
+                "• /getuserid - get user ID",
+            ]
+            title = "🧰 𝗧𝗼𝗼𝗹𝘀"
+        await _edit_text(
+            query,
+            context,
+            _format_report(title, lines),
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
     if data.startswith("admin:"):
         _set_admin_auto_delete(context, True)
     elif data.startswith("user:"):
@@ -1421,7 +1545,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await _edit_text(
                 query,
                 context,
-                f"{title['name']} - No episodes yet.",
+                _format_report("📚 𝗟𝗶𝗻𝗸 𝗠𝗮𝗻𝗴𝗮", [f"📚 Title: {title['name']}", "❌ No episodes yet."]),
                 reply_markup=InlineKeyboardMarkup(
                     [[InlineKeyboardButton("Back", callback_data="user:back")]]
                 ),
@@ -1439,16 +1563,16 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             keyboard.append(row)
         nav = []
         if page > 0:
-            nav.append(InlineKeyboardButton("Prev", callback_data=f"user:eps:{title_id}:{page-1}"))
+            nav.append(InlineKeyboardButton(BTN_PREV, callback_data=f"user:eps:{title_id}:{page-1}"))
         if page < pages - 1:
-            nav.append(InlineKeyboardButton("Next", callback_data=f"user:eps:{title_id}:{page+1}"))
+            nav.append(InlineKeyboardButton(BTN_NEXT, callback_data=f"user:eps:{title_id}:{page+1}"))
         if nav:
             keyboard.append(nav)
         keyboard.append([InlineKeyboardButton("Back", callback_data="user:back")])
         await _edit_text(
             query,
             context,
-            f"{title['name']} {LABEL_ALL_EPS}",
+            f"📚 𝗟𝗶𝗻𝗸 𝗠𝗮𝗻𝗴𝗮\n━━━━━━━━━━━━━━━━━━\n{title['name']}",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return
@@ -1468,7 +1592,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await _edit_text(
                 query,
                 context,
-                f"{title['name']} - No episodes yet.",
+                _format_report("📚 𝗟𝗶𝗻𝗸 𝗠𝗮𝗻𝗴𝗮", [f"📚 Title: {title['name']}", "❌ No episodes yet."]),
                 reply_markup=InlineKeyboardMarkup(
                     [[InlineKeyboardButton("Back", callback_data="user:back")]]
                 ),
@@ -1486,16 +1610,16 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             keyboard.append(row)
         nav = []
         if page > 0:
-            nav.append(InlineKeyboardButton("Prev", callback_data=f"user:eps:{title_id}:{page-1}"))
+            nav.append(InlineKeyboardButton(BTN_PREV, callback_data=f"user:eps:{title_id}:{page-1}"))
         if page < pages - 1:
-            nav.append(InlineKeyboardButton("Next", callback_data=f"user:eps:{title_id}:{page+1}"))
+            nav.append(InlineKeyboardButton(BTN_NEXT, callback_data=f"user:eps:{title_id}:{page+1}"))
         if nav:
             keyboard.append(nav)
         keyboard.append([InlineKeyboardButton("Back", callback_data="user:back")])
         await _edit_text(
             query,
             context,
-            f"{title['name']} {LABEL_ALL_EPS}",
+            f"📚 𝗟𝗶𝗻𝗸 𝗠𝗮𝗻𝗴𝗮\n━━━━━━━━━━━━━━━━━━\n{title['name']}",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return
@@ -1516,9 +1640,9 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         ]
         nav = []
         if page > 0:
-            nav.append(InlineKeyboardButton("Prev", callback_data=f"user:titles:{page-1}"))
+            nav.append(InlineKeyboardButton(BTN_TITLES_PREV, callback_data=f"user:titles:{page-1}"))
         if page < pages - 1:
-            nav.append(InlineKeyboardButton("Next", callback_data=f"user:titles:{page+1}"))
+            nav.append(InlineKeyboardButton(BTN_TITLES_NEXT, callback_data=f"user:titles:{page+1}"))
         if nav:
             keyboard.append(nav)
         await _edit_text(query, context, LABEL_TITLES, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1536,9 +1660,9 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         ]
         nav = []
         if page > 0:
-            nav.append(InlineKeyboardButton("Prev", callback_data=f"user:titles:{page-1}"))
+            nav.append(InlineKeyboardButton(BTN_TITLES_PREV, callback_data=f"user:titles:{page-1}"))
         if page < pages - 1:
-            nav.append(InlineKeyboardButton("Next", callback_data=f"user:titles:{page+1}"))
+            nav.append(InlineKeyboardButton(BTN_TITLES_NEXT, callback_data=f"user:titles:{page+1}"))
         if nav:
             keyboard.append(nav)
         await _edit_text(query, context, LABEL_TITLES, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1554,7 +1678,11 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if action == "add_title":
             _reset_pending(context)
             context.user_data["pending_action"] = "add_title"
-            await _edit_text(query, context, "Send the manga name:")
+            await _edit_text(
+                query,
+                context,
+                _format_report("✍️ 𝗔𝗱𝗱 𝗠𝗮𝗻𝗴𝗮", ["Send the manga name:"]),
+            )
             return
 
         if action == "manage":
@@ -1611,7 +1739,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await _edit_text(
                 query,
                 context,
-                f"{title['name']} - Choose an action:",
+                _format_report("🛠️ 𝗠𝗮𝗻𝗮𝗴𝗲 𝗠𝗮𝗻𝗴𝗮", [f"📚 Title: {title['name']}", "Choose an action:"]),
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
             return
@@ -1653,8 +1781,13 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 [InlineKeyboardButton("Add manga", callback_data="admin:add_title")],
                 [InlineKeyboardButton("Manage manga", callback_data="admin:manage")],
             ]
-            await _edit_text(query, context, 
-                f"Admin panel\nManga: {titles_count} | Episodes: {eps_count}",
+            await _edit_text(
+                query,
+                context,
+                _format_report(
+                    "🛠️ 𝗔𝗱𝗺𝗶𝗻 𝗣𝗮𝗻𝗲𝗹",
+                    [f"📚 Manga: {titles_count}", f"🎬 Episodes: {eps_count}"],
+                ),
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
             return
@@ -1688,7 +1821,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await _edit_text(
                 query,
                 context,
-                f"{title['name']} - Choose an action:",
+                _format_report("🛠️ 𝗠𝗮𝗻𝗮𝗴𝗲 𝗠𝗮𝗻𝗴𝗮", [f"📚 Title: {title['name']}", "Choose an action:"]),
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
             return
@@ -1709,7 +1842,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await _edit_text(
                 query,
                 context,
-                f"{title['name']} - Send episode name:",
+                _format_report("✍️ 𝗔𝗱𝗱 𝗘𝗽𝗶𝘀𝗼𝗱𝗲", [f"📚 Title: {title['name']}", "Send episode name:"]),
             )
             return
 
@@ -1848,8 +1981,10 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 nav.append(InlineKeyboardButton("Next", callback_data=f"admin:ep:{next_id}"))
             if nav:
                 keyboard.insert(0, nav)
-            await _edit_text(query, context, 
-                f"{_display_ep_name(ep['name'])}\nChoose an action:",
+            await _edit_text(
+                query,
+                context,
+                _format_report("🛠️ 𝗠𝗮𝗻𝗮𝗴𝗲 𝗘𝗽𝗶𝘀𝗼𝗱𝗲", [f"🎬 Episode: {_display_ep_name(ep['name'])}", "Choose an action:"]),
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
             return
@@ -1911,8 +2046,13 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             _reset_pending(context)
             context.user_data["pending_action"] = "edit_ep_url"
             context.user_data["pending_episode_id"] = episode_id
-            await _edit_text(query, context, 
-                f"{_display_ep_name(ep['name'])}\nSend the new episode link (http/https):",
+            await _edit_text(
+                query,
+                context,
+                _format_report(
+                    "✍️ 𝗘𝗱𝗶𝘁 𝗘𝗽𝗶𝘀𝗼𝗱𝗲 𝗟𝗶𝗻𝗸",
+                    [f"🎬 Episode: {_display_ep_name(ep['name'])}", "Send the new episode link (http/https):"],
+                ),
                 reply_markup=InlineKeyboardMarkup(
                     [[InlineKeyboardButton("Cancel", callback_data=f"admin:ep:{episode_id}")]]
                 ),
@@ -2095,7 +2235,7 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await _reply_text(
                 update,
                 context,
-                f"{text} - Choose an action:",
+                _format_report("🛠️ 𝗠𝗮𝗻𝗮𝗴𝗲 𝗠𝗮𝗻𝗴𝗮", [f"📚 Title: {text}", "Choose an action:"]),
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
         return
@@ -2103,13 +2243,24 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if pending == "add_ep_name":
         context.user_data["pending_ep_name"] = _normalize_ep_name(text)
         context.user_data["pending_action"] = "add_ep_url"
-        await _reply_text(update, context, "Send episode link (http/https):")
+        await _reply_text(
+            update,
+            context,
+            _format_report("✍️ 𝗔𝗱𝗱 𝗘𝗽𝗶𝘀𝗼𝗱𝗲 𝗟𝗶𝗻𝗸", ["Send episode link (http/https):"]),
+        )
         return
 
     if pending == "add_ep_url":
-        url = _normalize_url(text)
+        raw_text = (text or "").strip().lower()
+        if raw_text in {"nolink", "no link", "no-link", "no_link"}:
+            url = "https://www.facebook.com/nolink"
+        else:
+            url = _normalize_url(text)
         if not _valid_url(url):
             await _reply_text(update, context, "Invalid URL. Please send the link again (http/https):")
+            return
+        if _is_placeholder_link(url) and raw_text not in {"nolink", "no link", "no-link", "no_link"}:
+            await _reply_text(update, context, "Invalid link: placeholder link is not allowed. Send a real link.")
             return
         title_id = context.user_data.get("pending_title_id")
         ep_name = context.user_data.get("pending_ep_name")
@@ -2125,7 +2276,7 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         context.user_data.pop("pending_ep_name", None)
         context.user_data["pending_action"] = "add_ep_name"
-        await _reply_text(update, context, "Episode added. Send next episode name or /cancel.")
+        await _reply_text(update, context, "Episode added. Send next episode name or /done.")
         return
 
     if pending == "edit_title":
@@ -2186,9 +2337,16 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     if pending == "edit_ep_url":
-        url = _normalize_url(text)
+        raw_text = (text or "").strip().lower()
+        if raw_text in {"nolink", "no link", "no-link", "no_link"}:
+            url = "https://www.facebook.com/nolink"
+        else:
+            url = _normalize_url(text)
         if not _valid_url(url):
             await _reply_text(update, context, "Invalid URL. Please send the link again (http/https):")
+            return
+        if _is_placeholder_link(url) and raw_text not in {"nolink", "no link", "no-link", "no_link"}:
+            await _reply_text(update, context, "Invalid link: placeholder link is not allowed. Send a real link.")
             return
         episode_id = context.user_data.get("pending_episode_id")
         if not episode_id:
@@ -2254,7 +2412,6 @@ def main() -> None:
     app.add_handler(CommandHandler("findduplicatelink", _tracked_command("findduplicatelink", find_duplicate_link_command)))
     app.add_handler(CommandHandler("checktitlelinks", _tracked_command("checktitlelinks", check_title_links_command)))
     app.add_handler(CommandHandler("deadlinks", _tracked_command("deadlinks", dead_links_command)))
-    app.add_handler(CommandHandler("badlinks", _tracked_command("badlinks", dead_links_command)))
     app.add_handler(CommandHandler("topmanga", _tracked_command("topmanga", top_manga_command)))
     app.add_handler(CommandHandler("daily", _tracked_command("daily", daily_command)))
     app.add_handler(CommandHandler("backupdb", _tracked_command("backupdb", backup_db_command)))
