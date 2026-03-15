@@ -1502,7 +1502,6 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 "• /removemangaadmin <title> | <user_id/@username>",
                 "• /listadmin - list admins (main admins only)",
                 "• /cancel - cancel current admin input",
-                "• /done - finish bulk add input",
             ]
             title = "🛠️ 𝗔𝗱𝗺𝗶𝗻 𝗖𝗼𝗺𝗺𝗮𝗻𝗱𝘀"
         else:
@@ -2276,7 +2275,7 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         context.user_data.pop("pending_ep_name", None)
         context.user_data["pending_action"] = "add_ep_name"
-        await _reply_text(update, context, "Episode added. Send next episode name or /done.")
+        await _reply_text(update, context, "Episode added. Send next episode name or /cancel.")
         return
 
     if pending == "edit_title":
